@@ -5,7 +5,6 @@ import { useState, useEffect } from 'react'
 import {
   MapContainer, TileLayer, Marker, Popup, useMapEvents,
 } from 'react-leaflet'
-/* import { v4 as uuid } from 'uuid'*/
 
 L.Icon.Default.mergeOptions({
   iconUrl: '/leaflet/marker-icon.png',
@@ -24,12 +23,10 @@ export interface Note {
 export default function Map() {
   const [notes, setNotes] = useState<Note[]>([])
 
-  /* 初期ロード：DB から既存ノート取得 */
   useEffect(() => {
     fetch('/api/notes').then(r => r.json()).then(setNotes)
   }, [])
 
-  /* クリックで新規ノート */
   function ClickHandler() {
     useMapEvents({
       click(e) {
