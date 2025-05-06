@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react'
 import {
   MapContainer, TileLayer, Marker, Popup, useMapEvents,
 } from 'react-leaflet'
-import { v4 as uuid } from 'uuid'
+/* import { v4 as uuid } from 'uuid'*/
 
 L.Icon.Default.mergeOptions({
   iconUrl: '/leaflet/marker-icon.png',
@@ -87,7 +87,7 @@ export default function Map() {
       {notes.map(n => (
         <Marker key={n.id} position={[n.lat, n.lng]}>
           <Popup minWidth={220}>
-            {n.img_url && <img src={n.img_url} className="mb-2" />}
+            {n.img_url && <img src={n.img_url} alt="" className="mb-2" />}
             <textarea
               defaultValue={n.text}
               placeholder="説明を入力"

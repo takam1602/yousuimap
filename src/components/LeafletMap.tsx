@@ -1,5 +1,7 @@
 'use client'
+import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+
 import { useState, useEffect, useRef } from 'react'
 import { MapContainer, TileLayer, Marker, Popup, useMapEvents } from 'react-leaflet'
 import { v4 as uuidv4 } from 'uuid'
@@ -86,7 +88,7 @@ export default function LeafletMap() {
       {notes.map((n, i) => (
         <Marker key={n.id} position={[n.lat, n.lng]}>
           <Popup minWidth={200}>
-            {n.img_url && <img src={n.img_url} className="mb-2" />}
+            {n.img_url && <img src={n.img_url} alt="" className="mb-2" />}
             <textarea
               defaultValue={n.text}
               placeholder="説明を入力"
