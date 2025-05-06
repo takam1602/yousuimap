@@ -6,8 +6,8 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-export async function DELETE(_: NextRequest, context: { params: { id: string } }) {
-    const {id} = await context.params 
+export async function DELETE(_req: NextRequest, ctx: RouteHandlerContext<{ id: string }> ){
+    const {id} = await ctx.params 
     const { data, error: selErr } = await supabase
     .from('notes')
     .select('img_url')
