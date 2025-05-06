@@ -1,6 +1,5 @@
 'use client'
 
-/* ---------- 依存ライブラリ ---------- */
 import 'leaflet/dist/leaflet.css'
 import L from 'leaflet'
 import { useState, useEffect, useRef } from 'react'
@@ -10,27 +9,17 @@ import {
   Marker,
   Popup,
   useMapEvents,
-  // type Map as LeafletMap,
 } from 'react-leaflet'
-import type {Map as LeafletMap} from 'leaflet'
+import type { Map as LeafletMap } from 'leaflet'
 import { useSwipeable } from 'react-swipeable'
 import { IoTrashOutline, IoClose } from 'react-icons/io5'
 
-/* ---------- Leaflet デフォルトアイコン ---------- */
 L.Icon.Default.mergeOptions({
   iconUrl: '/leaflet/marker-icon.png',
   iconRetinaUrl: '/leaflet/marker-icon-2x.png',
   shadowUrl: '/leaflet/marker-shadow.png',
 })
 
-/* ---------- 型定義 ---------- */
-// Supabase 生成型をお使いのときはパスを合わせてください
-// import type { Database } from '@/types_db'
-// type NoteRow = Database['public']['Tables']['notes']['Row'] & {
-//   images?: { id: string; url: string }[]
-// }
-
-/* 生成型がまだ無い場合は ↓ の簡易型で十分動きます */
 type NoteRow = {
   id: string
   lat: number
@@ -51,6 +40,41 @@ interface Note {
   images: Image[]
 }
 
+/* ---------- 画像リサイズ関数 ---------- */
+async function resizeImage(
+  file: File,
+  maxW = 640,
+  maxH = 480,
+  mime = 'image/webp',
+  quality = 0.8,
+): Promise<Blob> {
+  const url = URL.createObjectURL(file)
+  const img = await new Promise<HTMLImageElement>((res, rej) => {
+    const image = new Image()
+    image.onload = () => res(image)
+    image.onerror = rej
+    image.src = url
+  })
+  URL.revokeObjectURL(url)
+
+  const scale = Math.min(maxW / img.width, maxH / img.height, 1)
+  const w = Math.round(img.width * scale)
+  const h = Math.round(img.height * scale)
+
+  const canvas = Object.assign(document.createElement('canvas'), {
+    width: w,
+    height: h,
+  })
+  const ctx = canvas.getContext('2d')!
+  ctx.drawImage(img, 0, 0, w, h)
+
+  const blob: Blob | null = await new Promise((res) =>
+    canvas.toBlob((b) => res(b), mime, quality),
+  )
+  if (!blob) throw new Error('toBlob failed')
+  return blob
+}
+
 /* ---------- メインコンポーネント ---------- */
 export default function Map() {
   const [notes, setNotes] = useState<Note[]>([])
@@ -63,17 +87,18 @@ export default function Map() {
       .then((r) => r.json())
       .then((raw: unknown) => {
         const rows = raw as NoteRow[]
-        setNotes(rows.map((n) => ({ 
+        setNotes(
+          rows.map((n) => ({
             id: n.id,
             lat: n.lat,
             lng: n.lng,
             text: n.text ?? '',
             images: n.images ?? [],
-            })),
+          })),
         )
-  })
-  .catch(console.error)
-  },[])
+      })
+      .catch(console.error)
+  }, [])
 
   /* ---- 2. 地図クリックで仮ノート追加＋即DB保存 ---- */
   function ClickHandler() {
@@ -87,7 +112,6 @@ export default function Map() {
         }
         setNotes((arr) => [...arr, newNote])
 
-        // DB に送るのは必要カラムのみ (images を含めない)
         fetch('/api/notes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -107,16 +131,20 @@ export default function Map() {
   async function saveNote(note: Note, file?: File) {
     let img_url: string | undefined
 
-    /* 3‑1 画像をアップロード */
+    /* 3‑1 画像をリサイズしてアップロード */
     if (file) {
+      const resized = await resizeImage(file, 640, 480, 'image/webp', 0.8)
+
       const res1 = await fetch('/api/upload-url', {
         method: 'POST',
-        body: JSON.stringify({ filename: `${note.id}-${file.name}` }),
+        body: JSON.stringify({
+          filename: `${note.id}-${Date.now()}.webp`,
+        }),
       })
       const { signedUrl, path } = await res1.json()
       if (!signedUrl) return alert('画像アップロード用 URL 取得失敗')
 
-      await fetch(signedUrl, { method: 'PUT', body: file })
+      await fetch(signedUrl, { method: 'PUT', body: resized })
       img_url =
         `${process.env.NEXT_PUBLIC_SUPABASE_URL}` +
         `/storage/v1/object/public/photos/${path}`
@@ -129,7 +157,6 @@ export default function Map() {
       })
       const { id: imgId } = await resImg.json()
 
-      /* フロント状態に追加 */
       setNotes((arr) =>
         arr.map((x) =>
           x.id === note.id
@@ -299,7 +326,6 @@ export default function Map() {
         center={[36.07, 140.11]}
         zoom={15}
         className="h-screen"
-        // whenReady={({ target }) => (mapRef.current = target)} 
       >
         <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
         <ClickHandler />
