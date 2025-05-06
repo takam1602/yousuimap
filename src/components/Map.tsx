@@ -1,5 +1,6 @@
 'use client'
 
+/* ---------- 依存ライブラリ ---------- */
 import 'leaflet/dist/leaflet.css'
 import L from 'leaflet'
 import { useState, useEffect, useRef } from 'react'
@@ -13,13 +14,16 @@ import {
 import type { Map as LeafletMap } from 'leaflet'
 import { useSwipeable } from 'react-swipeable'
 import { IoTrashOutline, IoClose } from 'react-icons/io5'
+import { supabase } from '@/lib/supabaseClient'   // ★OAuth セッション取得
 
+/* ---------- Leaflet デフォルトアイコン ---------- */
 L.Icon.Default.mergeOptions({
   iconUrl: '/leaflet/marker-icon.png',
   iconRetinaUrl: '/leaflet/marker-icon-2x.png',
   shadowUrl: '/leaflet/marker-shadow.png',
 })
 
+/* ---------- 型定義 ---------- */
 type NoteRow = {
   id: string
   lat: number
@@ -79,7 +83,15 @@ async function resizeImage(
 export default function Map() {
   const [notes, setNotes] = useState<Note[]>([])
   const [preview, setPreview] = useState<string | null>(null)
+  const [canEdit, setCanEdit] = useState(false)           // ★編集可フラグ
   const mapRef = useRef<LeafletMap | null>(null)
+
+  /* ---- 0. セッション確認 ---- */
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setCanEdit(!!data.session?.user)
+    })
+  }, [])
 
   /* ---- 1. 初期ロード ---- */
   useEffect(() => {
@@ -104,11 +116,13 @@ export default function Map() {
   function ClickHandler() {
     useMapEvents({
       click(e) {
+        if (!canEdit) return                            // ★閲覧専用の人は無効
         const newNote: Note = {
           id: crypto.randomUUID(),
           lat: e.latlng.lat,
           lng: e.latlng.lng,
           images: [],
+          text: '',
         }
         setNotes((arr) => [...arr, newNote])
 
@@ -127,11 +141,46 @@ export default function Map() {
     return null
   }
 
+  /* ---- 2‑b 位置情報から現在地ピン＋最大ズーム ---- */
+  async function addCurrentLocation() {
+    if (!navigator.geolocation) {
+      alert('このブラウザは位置情報をサポートしていません')
+      return
+    }
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude, longitude } = pos.coords
+        const newNote: Note = {
+          id: crypto.randomUUID(),
+          lat: latitude,
+          lng: longitude,
+          images: [],
+          text: '',
+        }
+        setNotes((arr) => [...arr, newNote])
+
+        await fetch('/api/notes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: newNote.id,
+            lat: newNote.lat,
+            lng: newNote.lng,
+            text: '',
+          }),
+        })
+
+        mapRef.current?.flyTo([latitude, longitude], 18)
+      },
+      () => alert('位置情報を取得できませんでした'),
+    )
+  }
+
   /* ---- 3. ノート & 画像保存 ---- */
   async function saveNote(note: Note, file?: File) {
+    if (!canEdit) return                                // ★閲覧専用なら無効
     let img_url: string | undefined
 
-    /* 3‑1 画像をリサイズしてアップロード */
     if (file) {
       const resized = await resizeImage(file, 640, 480, 'image/webp', 0.8)
 
@@ -149,7 +198,6 @@ export default function Map() {
         `${process.env.NEXT_PUBLIC_SUPABASE_URL}` +
         `/storage/v1/object/public/photos/${path}`
 
-      /* images テーブルへ INSERT */
       const resImg = await fetch('/api/images', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -172,7 +220,6 @@ export default function Map() {
       )
     }
 
-    /* 3‑2 notes upsert */
     await fetch('/api/notes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -187,6 +234,7 @@ export default function Map() {
 
   /* ---- 4. ノート削除 ---- */
   async function deleteNote(id: string) {
+    if (!canEdit) return
     if (!confirm('この地点のノートを削除しますか？')) return
     await fetch(`/api/notes/${id}`, { method: 'DELETE' })
     setNotes((arr) => arr.filter((n) => n.id !== id))
@@ -194,6 +242,7 @@ export default function Map() {
 
   /* ---- 5. 画像削除 ---- */
   async function deleteImage(noteId: string, img: Image) {
+    if (!canEdit) return
     await fetch(`/api/images/${img.id}`, { method: 'DELETE' })
     setNotes((arr) =>
       arr.map((n) =>
@@ -247,15 +296,17 @@ export default function Map() {
           </>
         )}
 
-        <button
-          className="absolute top-1 right-1 bg-black/60 text-white w-8 h-8 flex items-center justify-center rounded-full"
-          onClick={(e) => {
-            e.stopPropagation()
-            deleteImage(noteId, img)
-          }}
-        >
-          <IoTrashOutline />
-        </button>
+        {canEdit && (
+          <button
+            className="absolute top-1 right-1 bg-black/60 text-white w-8 h-8 flex items-center justify-center rounded-full"
+            onClick={(e) => {
+              e.stopPropagation()
+              deleteImage(noteId, img)
+            }}
+          >
+            <IoTrashOutline />
+          </button>
+        )}
       </div>
     )
   }
@@ -266,7 +317,10 @@ export default function Map() {
     return (
       <>
         <button
-          className="px-3 py-1 bg-gray-200 rounded w-full text-sm"
+          disabled={!canEdit}
+          className={`px-3 py-1 bg-gray-200 rounded w-full text-sm ${
+            canEdit ? '' : 'opacity-50 cursor-not-allowed'
+          }`}
           onClick={() => ref.current?.click()}
         >
           画像を選択
@@ -301,12 +355,22 @@ export default function Map() {
         </div>
       )}
 
-      {/* 現在地ボタン */}
+      {/* 現在地ピン追加ボタン */}
+      {canEdit && (
+        <button
+          className="fixed bottom-16 right-4 z-[1000] bg-green-600 text-white p-2 rounded shadow"
+          title="現在地にピンを追加"
+          onClick={addCurrentLocation}
+        >
+          📌＋
+        </button>
+      )}
+
+      {/* 現在地へ移動ボタン */}
       <button
         className="fixed bottom-4 right-4 z-[1000] bg-white p-2 rounded shadow"
         onClick={() => {
-          if (!navigator.geolocation)
-            return alert('位置情報非対応')
+          if (!navigator.geolocation) return alert('位置情報非対応')
           navigator.geolocation.getCurrentPosition(
             (pos) =>
               mapRef.current?.flyTo(
@@ -328,7 +392,7 @@ export default function Map() {
         className="h-screen"
       >
         <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-        <ClickHandler />
+        {canEdit && <ClickHandler />}
 
         {notes.map((n) => (
           <Marker key={n.id} position={[n.lat, n.lng]}>
@@ -339,26 +403,36 @@ export default function Map() {
 
               <textarea
                 defaultValue={n.text ?? ''}
-                placeholder="説明を入力"
-                className="w-full border p-1 text-sm mb-2"
+                placeholder={
+                  canEdit ? '説明を入力' : '閲覧モードでは編集できません'
+                }
+                className={`w-full border p-1 text-sm mb-2 ${
+                  canEdit ? '' : 'bg-gray-100'
+                }`}
+                readOnly={!canEdit}
                 onBlur={(e) => (n.text = e.target.value)}
               />
 
-              <FileButton onSelect={(file) => saveNote(n, file)} />
+              {canEdit && <FileButton onSelect={(file) => saveNote(n, file)} />}
 
               <button
-                className="px-3 py-1 bg-blue-600 text-white text-sm rounded w-full mt-2"
+                disabled={!canEdit}
+                className={`px-3 py-1 ${
+                  canEdit ? 'bg-blue-600 text-white' : 'bg-gray-400 text-gray-200'
+                } text-sm rounded w-full mt-2`}
                 onClick={() => saveNote(n)}
               >
                 保存
               </button>
 
-              <button
-                className="mt-2 w-full flex items-center justify-center gap-1 text-sm text-red-600"
-                onClick={() => deleteNote(n.id)}
-              >
-                <IoTrashOutline /> ノート削除
-              </button>
+              {canEdit && (
+                <button
+                  className="mt-2 w-full flex items-center justify-center gap-1 text-sm text-red-600"
+                  onClick={() => deleteNote(n.id)}
+                >
+                  <IoTrashOutline /> ノート削除
+                </button>
+              )}
             </Popup>
           </Marker>
         ))}

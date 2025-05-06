@@ -1,5 +1,6 @@
-import './globals.css'              // Tailwind など全体 CSS
+import './globals.css'            
 import type { ReactNode } from 'react'
+import LoginButton from '@/components/LoginButton'
 
 export const metadata = {
   title: '勘翁マップアプリ',        
@@ -10,7 +11,6 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="ja">
       <body className="min-h-screen flex flex-col">
-        {/* ── ヘッダー ───────────────────────── */}
         <header className="bg-gray-900 text-white py-4 shadow-md">
           <div className="max-w-5xl mx-auto px-4">
             <h1 className="text-2xl sm:text-3xl font-bold tracking-wide">
@@ -19,6 +19,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <p className="text-sm sm:text-base opacity-80">
               by takam1602
             </p>
+          </div>
+
+          <div className="absolute top-4 right-4">
+            <LoginButton />
           </div>
         </header>
 
