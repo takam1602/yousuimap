@@ -24,3 +24,9 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+body.logged-in header {
+  background: #4f46e5;   /* indigo-600 */
+  color: #fef08a;        /* yellow-100 */
+  transition: background .3s;
+}

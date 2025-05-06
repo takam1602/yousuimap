@@ -266,7 +266,7 @@ export default function Map() {
         <img
           src={img.url}
           alt=""
-          className="cursor-pointer"
+          className="cursor-pointer max-w-[240px] max-h-[180px] object-contain"
           onClick={(e) => {
             e.stopPropagation()
             setPreview(img.url)
@@ -358,7 +358,10 @@ export default function Map() {
       {/* 現在地ピン追加ボタン */}
       {canEdit && (
         <button
-          className="fixed bottom-16 right-4 z-[1000] bg-green-600 text-white p-2 rounded shadow"
+          className="fixed bottom-16 right-4 z-[1000]
+               bg-green-600 hover:bg-green-700 text-white
+               w-16 h-16 text-3xl rounded-full shadow-lg
+               flex items-center justify-center"
           title="現在地にピンを追加"
           onClick={addCurrentLocation}
         >
