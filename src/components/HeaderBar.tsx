@@ -10,9 +10,9 @@ export default function HeaderBar() {
     supabase.auth.getSession().then(({ data }) => {
       setLoggedIn(!!data.session?.user)
     })
-  }, [])
 
-  const { data: sub } = supabase.auth.onAuthStateChange(() =>
+    /* 状態変化にリアルタイム対応（任意）*/
+    const { data: sub } = supabase.auth.onAuthStateChange(() =>
       supabase.auth.getSession().then(({ data }) => {
         setLoggedIn(!!data.session?.user)
       }),
@@ -28,9 +28,9 @@ export default function HeaderBar() {
     >
       <div className="max-w-5xl mx-auto px-4">
         <h1 className="text-2xl sm:text-3xl font-bold tracking-wide">
-         {loggedIn 
-             ? 勘翁マップ ~巡って理解・土浦用水~
-             : 勘翁マップ ~巡って理解・土浦用水~ For Editor}       
+          {loggedIn
+            ? '勘翁マップ ~巡って理解・土浦用水~ For Editor'
+            : '勘翁マップ ~巡って理解・土浦用水~'}
         </h1>
         <p className="text-sm sm:text-base opacity-80">by takam1602</p>
       </div>
