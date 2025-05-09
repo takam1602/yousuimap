@@ -3,7 +3,6 @@
 /* ---------- 依存ライブラリ ---------- */
 import 'leaflet/dist/leaflet.css'
 import L from 'leaflet'
-import { useState, useEffect, useRef } from 'react'
 import {
   MapContainer,
   TileLayer,
@@ -14,7 +13,15 @@ import {
 import type { Map as LeafletMap } from 'leaflet'
 import { useSwipeable } from 'react-swipeable'
 import { IoTrashOutline, IoClose } from 'react-icons/io5'
-import { supabase } from '@/lib/supabaseClient'   // ★OAuth セッション取得
+import {
+  useState,
+  useEffect,
+  useRef,
+  Fragment
+} from 'react'
+import { supabase } from '@/lib/supabaseClient'
+import useFitBounds from '@/components/useFitBounds'
+import Toast from '@/components/Toast'
 
 /* ---------- Leaflet デフォルトアイコン ---------- */
 L.Icon.Default.mergeOptions({
@@ -24,14 +31,6 @@ L.Icon.Default.mergeOptions({
 })
 
 /* ---------- 型定義 ---------- */
-type NoteRow = {
-  id: string
-  lat: number
-  lng: number
-  text: string | null
-  images?: { id: string; url: string }[]
-}
-
 interface Image {
   id: string
   url: string
@@ -44,7 +43,7 @@ interface Note {
   images: Image[]
 }
 
-/* ---------- 画像リサイズ関数 ---------- */
+/* ---------- 画像リサイズ関数（ブラウザ内） ---------- */
 async function resizeImage(
   file: File,
   maxW = 640,
@@ -62,15 +61,11 @@ async function resizeImage(
   URL.revokeObjectURL(url)
 
   const scale = Math.min(maxW / img.width, maxH / img.height, 1)
-  const w = Math.round(img.width * scale)
-  const h = Math.round(img.height * scale)
-
   const canvas = Object.assign(document.createElement('canvas'), {
-    width: w,
-    height: h,
+    width: Math.round(img.width * scale),
+    height: Math.round(img.height * scale),
   })
-  const ctx = canvas.getContext('2d')!
-  ctx.drawImage(img, 0, 0, w, h)
+  canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height)
 
   const blob: Blob | null = await new Promise((res) =>
     canvas.toBlob((b) => res(b), mime, quality),
@@ -83,40 +78,35 @@ async function resizeImage(
 export default function Map() {
   const [notes, setNotes] = useState<Note[]>([])
   const [preview, setPreview] = useState<string | null>(null)
-  const [canEdit, setCanEdit] = useState(false)           // ★編集可フラグ
+  const [canEdit, setCanEdit] = useState(false)
   const mapRef = useRef<LeafletMap | null>(null)
+  const popupRefs = useRef<Record<string, L.Popup>>({}) // 保存後に閉じる
 
-  /* ---- 0. セッション確認 ---- */
+  /* ---- 0. 認証確認 ---- */
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       setCanEdit(!!data.session?.user)
     })
   }, [])
 
-  /* ---- 1. 初期ロード ---- */
+  /* ---- 1. 初期ロード & Bounds Fit ---- */
   useEffect(() => {
     fetch('/api/notes')
       .then((r) => r.json())
-      .then((raw: unknown) => {
-        const rows = raw as NoteRow[]
-        setNotes(
-          rows.map((n) => ({
-            id: n.id,
-            lat: n.lat,
-            lng: n.lng,
-            text: n.text ?? '',
-            images: n.images ?? [],
-          })),
-        )
+      .then((rows: Note[]) => {
+        setNotes(rows.map((n) => ({ ...n, text: n.text ?? '' })))
       })
       .catch(console.error)
   }, [])
 
-  /* ---- 2. 地図クリックで仮ノート追加＋即DB保存 ---- */
+  /* ピンが変わるたびに自動フィット */
+  useFitBounds(notes, mapRef)
+
+  /* ---- 2. 地図クリックで仮ノート ---- */
   function ClickHandler() {
     useMapEvents({
       click(e) {
-        if (!canEdit) return                            // ★閲覧専用の人は無効
+        if (!canEdit) return
         const newNote: Note = {
           id: crypto.randomUUID(),
           lat: e.latlng.lat,
@@ -125,30 +115,20 @@ export default function Map() {
           text: '',
         }
         setNotes((arr) => [...arr, newNote])
-
-        fetch('/api/notes', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            id: newNote.id,
-            lat: newNote.lat,
-            lng: newNote.lng,
-            text: '',
-          }),
-        }).catch(console.error)
       },
     })
     return null
   }
 
-  /* ---- 2‑b 位置情報から現在地ピン＋最大ズーム ---- */
+  /* ---- 3. 現在地ピン ＋ 最大ズーム ---- */
   async function addCurrentLocation() {
+    if (!canEdit) return
     if (!navigator.geolocation) {
-      alert('このブラウザは位置情報をサポートしていません')
+      alert('位置情報を取得できません')
       return
     }
     navigator.geolocation.getCurrentPosition(
-      async (pos) => {
+      (pos) => {
         const { latitude, longitude } = pos.coords
         const newNote: Note = {
           id: crypto.randomUUID(),
@@ -158,32 +138,20 @@ export default function Map() {
           text: '',
         }
         setNotes((arr) => [...arr, newNote])
-
-        await fetch('/api/notes', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            id: newNote.id,
-            lat: newNote.lat,
-            lng: newNote.lng,
-            text: '',
-          }),
-        })
-
         mapRef.current?.flyTo([latitude, longitude], 18)
       },
       () => alert('位置情報を取得できませんでした'),
     )
   }
 
-  /* ---- 3. ノート & 画像保存 ---- */
-  async function saveNote(note: Note, file?: File) {
-    if (!canEdit) return                                // ★閲覧専用なら無効
+  /* ---- 4. DB 保存 & Toast ---- */
+  const [toast, setToast] = useState('')
+  async function saveNote(note: Note, file?: File, closePopup?: () => void) {
+    if (!canEdit) return
     let img_url: string | undefined
 
     if (file) {
-      const resized = await resizeImage(file, 640, 480, 'image/webp', 0.8)
-
+      const resized = await resizeImage(file)
       const res1 = await fetch('/api/upload-url', {
         method: 'POST',
         body: JSON.stringify({
@@ -191,8 +159,6 @@ export default function Map() {
         }),
       })
       const { signedUrl, path } = await res1.json()
-      if (!signedUrl) return alert('画像アップロード用 URL 取得失敗')
-
       await fetch(signedUrl, { method: 'PUT', body: resized })
       img_url =
         `${process.env.NEXT_PUBLIC_SUPABASE_URL}` +
@@ -230,17 +196,20 @@ export default function Map() {
         text: note.text ?? '',
       }),
     })
+
+    setToast('保存しました')
+    closePopup?.()
+    if (closePopup) closePopup()
+    else popupRefs.current[note.id]?.close()
   }
 
-  /* ---- 4. ノート削除 ---- */
+  /* ---- 5. ノート／画像削除 ---- */
   async function deleteNote(id: string) {
     if (!canEdit) return
     if (!confirm('この地点のノートを削除しますか？')) return
     await fetch(`/api/notes/${id}`, { method: 'DELETE' })
     setNotes((arr) => arr.filter((n) => n.id !== id))
   }
-
-  /* ---- 5. 画像削除 ---- */
   async function deleteImage(noteId: string, img: Image) {
     if (!canEdit) return
     await fetch(`/api/images/${img.id}`, { method: 'DELETE' })
@@ -266,17 +235,18 @@ export default function Map() {
         <img
           src={img.url}
           alt=""
-          className="cursor-pointer max-w-[240px] max-h-[180px] object-contain"
+          className="cursor-pointer w-36 h-28 object-cover"
           onClick={(e) => {
             e.stopPropagation()
             setPreview(img.url)
           }}
         />
-
         {imgs.length > 1 && (
-          <>
+          <Fragment>
             <button
-              className="absolute left-0 top-1/2 -translate-y-1/2 bg-black/60 text-white w-8 h-8 flex items-center justify-center text-xl rounded-r"
+              className="absolute left-0 top-1/2 -translate-y-1/2
+                         bg-black/60 text-white w-8 h-8 flex items-center
+                         justify-center text-xl rounded-r"
               onClick={(e) => {
                 e.stopPropagation()
                 setIdx((idx - 1 + imgs.length) % imgs.length)
@@ -285,7 +255,9 @@ export default function Map() {
               ‹
             </button>
             <button
-              className="absolute right-0 top-1/2 -translate-y-1/2 bg-black/60 text-white w-8 h-8 flex items-center justify-center text-xl rounded-l"
+              className="absolute right-0 top-1/2 -translate-y-1/2
+                         bg-black/60 text-white w-8 h-8 flex items-center
+                         justify-center text-xl rounded-l"
               onClick={(e) => {
                 e.stopPropagation()
                 setIdx((idx + 1) % imgs.length)
@@ -293,12 +265,12 @@ export default function Map() {
             >
               ›
             </button>
-          </>
+          </Fragment>
         )}
-
         {canEdit && (
           <button
-            className="absolute top-1 right-1 bg-black/60 text-white w-8 h-8 flex items-center justify-center rounded-full"
+            className="absolute top-1 right-1 bg-black/60 text-white
+                       w-8 h-8 flex items-center justify-center rounded-full"
             onClick={(e) => {
               e.stopPropagation()
               deleteImage(noteId, img)
@@ -329,10 +301,19 @@ export default function Map() {
           ref={ref}
           type="file"
           accept="image/*"
+          capture="environment"           /* ★ 撮影時はカメラ画像を直接取得 */
           className="hidden"
-          onChange={(e) => {
+          onChange={async (e) => {
             const f = e.target.files?.[0]
-            if (f) onSelect(f)
+            if (!f) return
+            const resized =
+              f.size > 1024 * 200 ? await resizeImage(f) : f /* 200KB 超なら縮小 */
+            onSelect(
+              new File([resized], f.name, {
+                type: resized.type,
+                lastModified: Date.now(),
+              }),
+            )
           }}
         />
       </>
@@ -342,7 +323,7 @@ export default function Map() {
   /* ---------- JSX ---------- */
   return (
     <>
-      {/* モーダル */}
+      {/* モーダル拡大 */}
       {preview && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[1000]">
           <img src={preview} alt="" className="max-h-[80vh] max-w-[90vw]" />
@@ -355,21 +336,24 @@ export default function Map() {
         </div>
       )}
 
-      {/* 現在地ピン追加ボタン */}
+      {/* Toast */}
+      <Toast message={toast} onDone={() => setToast('')} />
+
+      {/* 現在地ピン */}
       {canEdit && (
         <button
           className="fixed bottom-16 right-4 z-[1000]
-               bg-green-600 hover:bg-green-700 text-white
-               w-16 h-16 text-3xl rounded-full shadow-lg
-               flex items-center justify-center"
+                     bg-green-600 hover:bg-green-700 text-white
+                     w-16 h-16 text-3xl rounded-full shadow-lg
+                     flex items-center justify-center"
           title="現在地にピンを追加"
           onClick={addCurrentLocation}
         >
-          📌＋
+          📌
         </button>
       )}
 
-      {/* 現在地へ移動ボタン */}
+      {/* 現在地 Center */}
       <button
         className="fixed bottom-4 right-4 z-[1000] bg-white p-2 rounded shadow"
         onClick={() => {
@@ -388,18 +372,22 @@ export default function Map() {
       </button>
 
       {/* 地図 */}
-      <MapContainer
-        ref={mapRef}
-        center={[36.07, 140.11]}
-        zoom={15}
-        className="h-screen"
-      >
+      <MapContainer ref={mapRef} center={[36.07,140.11]} zoom={13} className="h-screen">
         <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
         {canEdit && <ClickHandler />}
 
         {notes.map((n) => (
           <Marker key={n.id} position={[n.lat, n.lng]}>
-            <Popup minWidth={260} autoClose={false} closeOnClick={false}>
+            <Popup
+              ref={(p) => {
+                if (p) popupRefs.current[n.id] = p
+              }}
+              minWidth={260}
+              maxWidth={320}
+              autoClose={false}
+              closeOnClick={false}
+              className="max-w-[90vw] sm:max-w-[320px]" /* モバイル幅調整 */
+            >
               {n.images.length > 0 && (
                 <Carousel noteId={n.id} imgs={n.images} />
               )}
@@ -416,21 +404,28 @@ export default function Map() {
                 onBlur={(e) => (n.text = e.target.value)}
               />
 
-              {canEdit && <FileButton onSelect={(file) => saveNote(n, file)} />}
+              {canEdit && <FileButton onSelect={(f) => saveNote(n, f,()=>popupRefs.current[n.id]?.close())} />}
 
               <button
                 disabled={!canEdit}
                 className={`px-3 py-1 ${
-                  canEdit ? 'bg-blue-600 text-white' : 'bg-gray-400 text-gray-200'
+                  canEdit
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'bg-gray-400 text-gray-200'
                 } text-sm rounded w-full mt-2`}
-                onClick={() => saveNote(n)}
+                onClick={() =>
+                  saveNote(n, undefined, () =>
+                    popupRefs.current[n.id]?.close(),
+                  )
+                }
               >
-                保存
+                保存して閉じる
               </button>
 
               {canEdit && (
                 <button
-                  className="mt-2 w-full flex items-center justify-center gap-1 text-sm text-red-600"
+                  className="mt-2 w-full flex items-center
+                             justify-center gap-1 text-sm text-red-600"
                   onClick={() => deleteNote(n.id)}
                 >
                   <IoTrashOutline /> ノート削除

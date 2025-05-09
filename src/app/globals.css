@@ -30,3 +30,18 @@ body.logged-in header {
   color: #fef08a;        /* yellow-100 */
   transition: background .3s;
 }
+
+
+.leaflet-popup-content-wrapper {
+  max-width: 90vw !important;
+}
+
+/* Fade animation for toast */
+@keyframes fadeInOut {
+  0%   { opacity: 0 }
+  10%,90% { opacity: 1 }
+  100% { opacity: 0 }
+}
+.animate-fade {
+  animation: fadeInOut 2.5s forwards;
+}
