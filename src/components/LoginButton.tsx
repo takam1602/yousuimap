@@ -4,24 +4,23 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 
 export default function LoginButton() {
-  const [user, setUser] = useState<null | { email?: string }>(null)
+  const [user, setUser] = useState<null | { id: string }>(null)
   const router = useRouter()
 
-  /* セッションを監視して UI を即時更新 */
+  /* --- ① すべてのセッション変化イベントを捕捉 ----------------------- */
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setUser(data.session?.user ?? null)
-    })
+    /* initialSession はページロード後必ず 1 回飛んで来る */
     const { data: sub } = supabase.auth.onAuthStateChange(
-      (_e, sess) => {
-        setUser(sess?.user ?? null)
-        router.refresh()
+      (event, session) => {
+        setUser(session?.user ?? null) // signIn / signOut / initialSession
+        router.refresh()               // <== Server Components も即更新
       },
     )
     return () => sub.subscription.unsubscribe()
   }, [router])
 
-  if (user)
+  /* --- UI -------------------------------------------------------------- */
+  if (user) {
     return (
       <button
         onClick={() =>
@@ -32,6 +31,7 @@ export default function LoginButton() {
         Log&nbsp;out
       </button>
     )
+  }
 
   return (
     <button
@@ -43,7 +43,6 @@ export default function LoginButton() {
       }
       className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded flex items-center gap-1"
     >
-      {/* GitHub アイコン */}
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"
            className="w-4 h-4 fill-current">
         <path d="M8 .198a8 8 0 0 0-2.557 15.6c..."/>
