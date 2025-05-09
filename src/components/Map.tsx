@@ -101,7 +101,7 @@ function FileButton({
           const f = e.target.files?.[0]
           if (!f) return
           const processed =
-            f.size > 10 * 1024 * 1024            // 10 MB 超なら縮小
+            f.size > 100 * 1024
               ? await resizeImage(f)
               : f
           onSelect(
