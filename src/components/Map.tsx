@@ -18,7 +18,8 @@ import {
   useRef,
   Fragment,
 } from 'react'
-import { supabase } from '@/lib/supabaseClient'
+// import { supabase } from '@/lib/supabaseClient'
+import { useAuth } from '@/contexts/AuthContext'
 import useFitBounds from '@/components/useFitBounds'
 import Toast from '@/components/Toast'
 
@@ -34,7 +35,7 @@ interface Image { id: string; url: string }
 interface Note  { id: string; lat: number; lng: number; text: string; images: Image[] }
 
 /* ---------- 画像リサイズ ---------- */
-async function resizeImage(file: File, mw = 640, mh = 480) {
+async function resizeImage(file: File, mw = 1920, mh = 1440) {
   const url = URL.createObjectURL(file)
   const img: HTMLImageElement = await new Promise((ok, ng) => {
     const i = new Image()
@@ -59,18 +60,19 @@ export default function Map() {
   const [notes, setNotes] = useState<Note[]>([])
   const [preview, setPreview] = useState<string | null>(null)
   const [toast, setToast] = useState('')
-  const [canEdit, setCanEdit] = useState(false)
-
+  // const [canEdit, setCanEdit] = useState(false)
+  const { user } = useAuth()
+  const canEdit = !!user
   const mapRef = useRef<LeafletMap | null>(null)
   const popupRefs = useRef<Record<string, L.Popup>>({})
 
-  /* 認証 → canEdit */
-  useEffect(() => {
-    const { data: sub } = supabase.auth.onAuthStateChange(
-      (_e, s) => setCanEdit(!!s?.user),
-    )
-    return () => sub.subscription.unsubscribe()
-  }, [])
+  // /* 認証 → canEdit */
+  // useEffect(() => {
+  //   const { data: sub } = supabase.auth.onAuthStateChange(
+  //     (_e, s) => setCanEdit(!!s?.user),
+  //   )
+  //   return () => sub.subscription.unsubscribe()
+  // }, [])
 
   /* 初期ロード */
   useEffect(() => {
@@ -303,7 +305,7 @@ export default function Map() {
             if (!f) return
 
             const processed =
-                f.size > 200 * 1024 ? await resizeImage(f) : f
+                f.size > 10 * 1024 * 1024 ? await resizeImage(f) : f
             
             onSelect(
                 new File([processed], f.name, {
@@ -324,6 +326,28 @@ export default function Map() {
       {preview && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[1000]">
           <img src={preview} alt="" className="max-h-[80vh] max-w-[90vw]" />
+
+          {typeof navigator.canShare === 'function' && (
+              <button
+                className="absolute bottom-6 left-1/2 -translate-x-1/2
+                           bg-white/90 px-4 py-1 rounded shadow text-sm"
+                onClick={async () => {
+                  try {
+                    await navigator.share({
+                      files: [await fetch(preview).then((r) => r.blob()).then(
+                        (b) => new File([b], 'photo.webp', { type: 'image/webp' }),
+                      )],
+                      title: '画像を保存',
+                    })
+                  } catch (e) {
+                    console.error(e)
+                  }
+                }}
+              >
+                画像を共有/保存
+              </button>
+            )}
+
           <button
             className="absolute top-4 right-4 text-white text-3xl"
             onClick={() => setPreview(null)}
