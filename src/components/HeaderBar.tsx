@@ -12,6 +12,14 @@ export default function HeaderBar() {
     })
   }, [])
 
+  const { data: sub } = supabase.auth.onAuthStateChange(() =>
+      supabase.auth.getSession().then(({ data }) => {
+        setLoggedIn(!!data.session?.user)
+      }),
+    )
+    return () => sub.subscription.unsubscribe()
+  }, [])
+
   return (
     <header
       className={`py-4 shadow-md relative transition-colors duration-300
@@ -20,9 +28,11 @@ export default function HeaderBar() {
     >
       <div className="max-w-5xl mx-auto px-4">
         <h1 className="text-2xl sm:text-3xl font-bold tracking-wide">
-          勘翁マップ &nbsp;~巡って理解・土浦用水~
+         {loggedIn 
+             ? 勘翁マップ ~巡って理解・土浦用水~
+             : 勘翁マップ ~巡って理解・土浦用水~ For Editor}       
         </h1>
-        <p className="text-sm sm:text-base opacity-80">by&nbsp;takam1602</p>
+        <p className="text-sm sm:text-base opacity-80">by takam1602</p>
       </div>
 
       <div className="absolute top-4 right-4">
