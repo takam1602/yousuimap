@@ -40,13 +40,10 @@ import Toast             from '@/components/Toast'
 interface Image { id: string; url: string }
 interface Note  { id: string; lat: number; lng: number; text: string; images: Image[] }
 
-/* ───────────────────────────────────── */
-/* util： 大き過ぎる画像を client-side で縮小                               */
-/* ───────────────────────────────────── */
 async function resizeImage(
   file: File,
-  maxW = 1920,
-  maxH = 1440,
+  maxW = 1280,
+  maxH = 960,
 ): Promise<Blob> {
   const tmpURL  = URL.createObjectURL(file)
   const imgElm  = await new Promise<HTMLImageElement>((ok, ng) => {
@@ -101,7 +98,7 @@ function FileButton({
           const f = e.target.files?.[0]
           if (!f) return
           const processed =
-            f.size > 100 * 1024
+            f.size > 80 * 1024
               ? await resizeImage(f)
               : f
           onSelect(
