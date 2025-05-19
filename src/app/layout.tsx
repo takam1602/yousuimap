@@ -1,4 +1,5 @@
 import './globals.css'
+import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
 import HeaderBar from '@/components/HeaderBar'
 import { AuthProvider } from '@/contexts/AuthContext'
@@ -6,6 +7,9 @@ import { AuthProvider } from '@/contexts/AuthContext'
 export const metadata = {
   title: '勘翁マップアプリ',
   description: 'map app by takam1602',
+  verification:{
+      google:"3ITIM0eNhLXG7UpZW7hjxVztQhiSe9Ajga0j3aIicIw",
+    },
 }
 
 export default function RootLayout({ children }: { children: ReactNode }) {
