@@ -8,6 +8,7 @@ import { v4 as uuidv4 } from 'uuid'
 import markerIcon from '/leaflet/marker-icon.png'
 import markerIcon2x from '/leaflet/marker-icon-2x.png'
 import markerShadow from '/leaflet/marker-shadow.png'
+import { supabase } from '../lib/supabaseClient'
 
 L.Icon.Default.mergeOptions({
   iconUrl: markerIcon.src ?? markerIcon,          // Next 15 は拡張子付き import に .src が付く
@@ -115,7 +116,7 @@ export default function LeafletMap() {
             </button>
           </Popup>
         </Marker>
-      ))}
+      )})}
     </MapContainer>
   )
 }
