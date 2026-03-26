@@ -62,7 +62,9 @@ export default function LeafletMap() {
       // PUT で直接アップロード
       await fetch(url, { method: 'PUT', body: file })
 
-      img_url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/photos/${path}`
+      // プロジェクトIDに依存しない public URL を取得
+      const { data: { publicUrl } } = supabase!.storage.from('photos').getPublicUrl(path)
+      img_url = publicUrl
     }
 
     /* 2. メタデータ保存 */
@@ -85,16 +87,20 @@ export default function LeafletMap() {
     <MapContainer center={[35, 135]} zoom={5} style={{ height: '100vh', width: '100%' }}>
       <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
       <ClickHandler />
-      {notes.map((n, i) => (
-        <Marker key={n.id} position={[n.lat, n.lng]}>
-          <Popup minWidth={200}>
-            {n.img_url && <img src={n.img_url} alt="" className="mb-2" />}
-            <textarea
-              defaultValue={n.text}
-              placeholder="説明を入力"
-              className="w-full border p-1 text-sm mb-2"
-              onBlur={e => (n.text = e.target.value)}
-            />
+      {notes.map((n, i) => {
+        // API (notes) から返る images(url) または直接の img_url を優先
+        const displayUrl = n.img_url || (n as any).images?.[0]?.url;
+        
+        return (
+          <Marker key={n.id} position={[n.lat, n.lng]}>
+            <Popup minWidth={200}>
+              {displayUrl && <img src={displayUrl} alt="" className="mb-2 w-full h-auto" />}
+              <textarea
+                defaultValue={n.text}
+                placeholder="説明を入力"
+                className="w-full border p-1 text-sm mb-2"
+                onBlur={e => (n.text = e.target.value)}
+              />
             <input
               type="file"
               accept="image/*"
