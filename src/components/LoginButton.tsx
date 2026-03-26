@@ -2,16 +2,18 @@
 import { supabase } from '@/lib/supabaseClient'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import type { AuthChangeEvent, Session, User } from '@supabase/supabase-js'
 
 export default function LoginButton() {
-  const [user, setUser] = useState<null | { id: string }>(null)
+  const [user, setUser] = useState<User | null>(null)
   const router = useRouter()
 
   /* --- ① すべてのセッション変化イベントを捕捉 ----------------------- */
   useEffect(() => {
+    if (!supabase) return
     /* initialSession はページロード後必ず 1 回飛んで来る */
     const { data: sub } = supabase.auth.onAuthStateChange(
-      (event, session) => {
+      (event: AuthChangeEvent, session: Session | null) => {
         setUser(session?.user ?? null) // signIn / signOut / initialSession
         router.refresh()               // <== Server Components も即更新
       },

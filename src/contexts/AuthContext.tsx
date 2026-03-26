@@ -8,7 +8,7 @@ import {
 } from 'react'
 
 import { supabase } from '@/lib/supabaseClient'
-import type { Session, User } from '@supabase/supabase-js'
+import type { AuthChangeEvent, Session, User } from '@supabase/supabase-js'
 
 interface AuthCtx {
   session: Session | null
@@ -26,13 +26,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    if (!supabase) {
+      setLoading(false)
+      return
+    }
     // 初期セッション取得
-    supabase.auth.getSession().then(({ data }) => {
+    supabase.auth.getSession().then(({ data }: { data: { session: Session | null } }) => {
       setSession(data.session ?? null)
       setLoading(false)
     })
     // ログイン・ログアウト監視
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) =>
+    const { data: sub } = supabase.auth.onAuthStateChange((_e: AuthChangeEvent, s: Session | null) =>
       setSession(s ?? null),
     )
     return () => sub.subscription.unsubscribe()
