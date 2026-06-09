@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { IoMapOutline, IoOpenOutline } from 'react-icons/io5'
+import { IoCubeOutline, IoMapOutline, IoOpenOutline, IoStatsChartOutline } from 'react-icons/io5'
 import { waterwayMaps } from '@/lib/waterwayMaps'
 
 export default function Home() {
@@ -14,7 +14,33 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="mx-auto grid max-w-5xl gap-3 px-4 py-6 sm:grid-cols-2">
+      <section className="mx-auto grid max-w-5xl gap-3 px-4 py-6">
+        <Link
+          href="/terrain/tsuchiura-yosui"
+          className="group rounded border bg-white p-4 shadow-sm transition hover:border-teal-500 hover:shadow-md"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex min-w-0 gap-3">
+              <span className="mt-1 flex h-10 w-10 shrink-0 items-center justify-center rounded bg-teal-50 text-xl text-teal-700">
+                <IoCubeOutline />
+              </span>
+              <div className="min-w-0">
+                <h3 className="text-lg font-semibold">土浦用水 3D地形・標高断面</h3>
+                <p className="mt-1 flex items-center gap-1 text-xs text-gray-500">
+                  <IoStatsChartOutline />
+                  DEM試作
+                </p>
+              </div>
+            </div>
+            <IoOpenOutline className="mt-1 shrink-0 text-gray-400 transition group-hover:text-teal-700" />
+          </div>
+          <p className="mt-3 text-sm leading-6 text-gray-600">
+            保存済みピンを3D地形に重ね、複数地点を結ぶ測線の標高断面を確認できます。
+          </p>
+        </Link>
+      </section>
+
+      <section className="mx-auto grid max-w-5xl gap-3 px-4 pb-6 sm:grid-cols-2">
         {waterwayMaps.map((map) => (
           <Link
             key={map.slug}
