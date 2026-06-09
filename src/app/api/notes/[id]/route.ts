@@ -1,29 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { createSupabaseAdmin, requireEditor } from '@/lib/serverSupabase'
 
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { id } = await params
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
+  const auth = await requireEditor(req)
+  if ('error' in auth) return auth.error
 
-  const { data, error: selErr } = await supabase
-    .from('notes')
-    .select('img_url')
-    .eq('id', id)
-    .single()
+  const { id } = await params
+  const supabase = createSupabaseAdmin()
+
+  const { data: images, error: selErr } = await supabase
+    .from('images')
+    .select('url')
+    .eq('note_id', id)
 
   if (selErr)
     return NextResponse.json({ selErr }, { status: 500 })
 
-  if (data?.img_url) {
-    const path = data.img_url.split('/photos/')[1]
-    await supabase.storage.from('photos').remove([path])
-  }
+  const paths = (images ?? [])
+    .map((img) => img.url.split('/photos/')[1])
+    .filter(Boolean)
+
+  if (paths.length > 0) await supabase.storage.from('photos').remove(paths)
 
   const { error: delErr } = await supabase
     .from('notes')

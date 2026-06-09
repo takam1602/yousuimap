@@ -1,15 +1,15 @@
 // src/app/api/images/[id]/route.ts
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { createSupabaseAdmin, requireEditor } from '@/lib/serverSupabase'
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireEditor(req)
+  if ('error' in auth) return auth.error
+
   const { id } = await params
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
+  const supabase = createSupabaseAdmin()
   // 画像URL取得 → Storage ファイルも削除
   const { data, error: selErr } = await supabase
     .from('images')
@@ -19,7 +19,7 @@ export async function DELETE(
   if (selErr) return NextResponse.json({ selErr }, { status: 500 })
 
   const path = data.url.split('/photos/')[1]
-  await supabase.storage.from('photos').remove([path])
+  if (path) await supabase.storage.from('photos').remove([path])
 
   const { error: delErr } = await supabase.from('images').delete().eq('id', id)
   if (delErr) return NextResponse.json({ delErr }, { status: 500 })

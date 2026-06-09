@@ -2,16 +2,36 @@ name: Supabase Keep Alive
 
 on:
   schedule:
-    # 毎日 00:00 UTC (日本時間 09:00) に実行
-    - cron: '0 0 * * *'
-  workflow_dispatch: # 手動でテスト実行できるようにする
+    # GitHub Actions can delay or drop jobs at minute 0, so avoid the top of the hour.
+    - cron: '17 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-keep-alive
+  cancel-in-progress: false
 
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
     steps:
+      - name: Validate secrets
+        run: |
+          set -euo pipefail
+          test -n "$SUPABASE_URL"
+          test -n "$SUPABASE_ANON_KEY"
+
       - name: Ping Supabase REST API
         run: |
-          curl -X GET "${{ secrets.SUPABASE_URL }}/rest/v1/notes?select=id&limit=1" \
-          -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
-          -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}"
+          set -euo pipefail
+          base_url="${SUPABASE_URL%/}"
+          curl --fail --show-error --silent --retry 3 --retry-delay 10 \
+            "${base_url}/rest/v1/notes?select=id&limit=1" \
+            -H "apikey: ${SUPABASE_ANON_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}"

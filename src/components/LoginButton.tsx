@@ -1,55 +1,40 @@
 'use client'
 import { supabase } from '@/lib/supabaseClient'
-import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import type { AuthChangeEvent, Session, User } from '@supabase/supabase-js'
+import { IoLogoGithub } from 'react-icons/io5'
+import { useAuth } from '@/contexts/AuthContext'
 
 export default function LoginButton() {
-  const [user, setUser] = useState<User | null>(null)
+  const { user } = useAuth()
   const router = useRouter()
 
-  /* --- ① すべてのセッション変化イベントを捕捉 ----------------------- */
-  useEffect(() => {
-    if (!supabase) return
-    /* initialSession はページロード後必ず 1 回飛んで来る */
-    const { data: sub } = supabase.auth.onAuthStateChange(
-      (event: AuthChangeEvent, session: Session | null) => {
-        setUser(session?.user ?? null) // signIn / signOut / initialSession
-        router.refresh()               // <== Server Components も即更新
-      },
-    )
-    return () => sub.subscription.unsubscribe()
-  }, [router])
-
-  /* --- UI -------------------------------------------------------------- */
   if (user) {
     return (
       <button
+        type="button"
         onClick={() =>
           supabase.auth.signOut().then(() => router.refresh())
         }
-        className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white rounded"
+        className="w-fit rounded bg-red-500 px-3 py-2 text-sm text-white hover:bg-red-600"
       >
-        Log&nbsp;out
+        Log out
       </button>
     )
   }
 
   return (
     <button
+      type="button"
       onClick={() =>
         supabase.auth.signInWithOAuth({
           provider: 'github',
           options: { redirectTo: window.location.origin },
         })
       }
-      className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded flex items-center gap-1"
+      className="flex w-fit items-center gap-2 rounded bg-green-600 px-3 py-2 text-sm text-white hover:bg-green-700"
     >
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"
-           className="w-4 h-4 fill-current">
-        <path d="M8 .198a8 8 0 0 0-2.557 15.6c..."/>
-      </svg>
-      GitHub&nbsp;Login
+      <IoLogoGithub className="text-base" />
+      GitHub Login
     </button>
   )
 }

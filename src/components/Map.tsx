@@ -19,13 +19,22 @@ L.Icon.Default.mergeOptions({
 })
 
 /* ───── そのほか UI/状態系 ───── */
-import { IoTrashOutline, IoClose } from 'react-icons/io5'
+import {
+  IoAdd,
+  IoClose,
+  IoImageOutline,
+  IoListOutline,
+  IoLocateOutline,
+  IoSearchOutline,
+  IoTrashOutline,
+} from 'react-icons/io5'
 import { useSwipeable }            from 'react-swipeable'
 import {
   Fragment,
   memo,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react'
@@ -66,6 +75,15 @@ async function resizeImage(
   )
 }
 
+async function responseError(res: Response) {
+  try {
+    const body = await res.json()
+    return body?.error?.message ?? body?.error ?? body?.selErr?.message ?? body?.delErr?.message ?? res.statusText
+  } catch {
+    return await res.text() || res.statusText
+  }
+}
+
 /* ───────────────────────────────────── */
 /* Re-usable FileButton                                                      */
 /* ───────────────────────────────────── */
@@ -80,12 +98,14 @@ function FileButton({
   return (
     <>
       <button
+        type="button"
         disabled={disabled}
-        className={`px-3 py-1 bg-gray-200 rounded w-full text-sm ${
-          disabled ? 'opacity-50 cursor-not-allowed' : ''
+        className={`flex w-full items-center justify-center gap-2 rounded bg-gray-200 px-3 py-2 text-sm hover:bg-gray-300 ${
+          disabled ? 'cursor-not-allowed opacity-50' : ''
         }`}
         onClick={() => ref.current?.click()}
       >
+        <IoImageOutline />
         画像を登録
       </button>
 
@@ -107,6 +127,7 @@ function FileButton({
               lastModified: Date.now(),
             }),
           )
+          e.currentTarget.value = ''
         }}
       />
     </>
@@ -136,20 +157,20 @@ const Carousel = memo(function Carousel({
   })
 
   return (
-    <div {...swipeHandlers} className="relative mb-2">
+    <div {...swipeHandlers} className="relative mb-2 overflow-hidden rounded border bg-gray-50">
       <img
         src={img.url}
-        alt=""
-        className="cursor-pointer w-36 h-28 object-cover"
+        alt="地点写真"
+        className="h-40 w-full cursor-pointer object-cover"
         onClick={() => onPreview(img.url)}
       />
 
       {imgs.length > 1 && (
         <Fragment>
           <button
-            className="absolute left-0 top-1/2 -translate-y-1/2
-                       bg-black/60 text-white w-8 h-8 flex items-center
-                       justify-center text-xl rounded-r"
+            type="button"
+            aria-label="前の画像"
+            className="absolute left-0 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-r bg-black/60 text-xl text-white"
             onClick={(e) => {
               e.stopPropagation()
               setIdx((idx - 1 + imgs.length) % imgs.length)
@@ -158,9 +179,9 @@ const Carousel = memo(function Carousel({
             ‹
           </button>
           <button
-            className="absolute right-0 top-1/2 -translate-y-1/2
-                       bg-black/60 text-white w-8 h-8 flex items-center
-                       justify-center text-xl rounded-l"
+            type="button"
+            aria-label="次の画像"
+            className="absolute right-0 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-l bg-black/60 text-xl text-white"
             onClick={(e) => {
               e.stopPropagation()
               setIdx((idx + 1) % imgs.length)
@@ -168,13 +189,17 @@ const Carousel = memo(function Carousel({
           >
             ›
           </button>
+          <span className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full bg-black/60 px-2 py-0.5 text-xs text-white">
+            {idx + 1} / {imgs.length}
+          </span>
         </Fragment>
       )}
 
       {canEdit && (
         <button
-          className="absolute top-1 right-1 bg-black/60 text-white
-                     w-8 h-8 flex items-center justify-center rounded-full"
+          type="button"
+          aria-label="画像を削除"
+          className="absolute right-2 top-2 flex h-9 w-9 items-center justify-center rounded-full bg-black/60 text-white hover:bg-red-600"
           onClick={(e) => {
             e.stopPropagation()
             onDelete(img)
@@ -191,26 +216,63 @@ const Carousel = memo(function Carousel({
 /*                Main Map               */
 /* ───────────────────────────────────── */
 export default function Map() {
-  const { user } = useAuth()
+  const { session, user } = useAuth()
   const canEdit  = !!user
 
   const [notes , setNotes ] = useState<Note[]>([])
+  const [loading, setLoading] = useState(true)
   const [toast , setToast ] = useState('')
   const [preview, setPreview] = useState<string | null>(null)
+  const [showList, setShowList] = useState(false)
+  const [query, setQuery] = useState('')
+  const [savingId, setSavingId] = useState<string | null>(null)
 
   const mapRef    = useRef<LeafletMap | null>(null)
   const popupRefs = useRef<Record<string, L.Popup>>({})
 
+  const authHeaders = useCallback((json = false) => {
+    if (!session?.access_token) throw new Error('ログインが必要です')
+    return {
+      ...(json ? { 'Content-Type': 'application/json' } : {}),
+      Authorization: `Bearer ${session.access_token}`,
+    }
+  }, [session])
+
+  const openNote = useCallback((note: Note) => {
+    mapRef.current?.flyTo([note.lat, note.lng], Math.max(mapRef.current.getZoom(), 16))
+    popupRefs.current[note.id]?.openOn(mapRef.current!)
+    setShowList(false)
+  }, [])
+
   /*  初回ロード  */
   useEffect(() => {
-    fetch('/api/notes')
-      .then((r) => r.json())
-      .then((rows: Note[]) =>
-        setNotes(
-          rows.map((n) => ({ ...n, text: n.text ?? '' })),
-        ),
-      )
+    let ignore = false
+
+    async function load() {
+      setLoading(true)
+      try {
+        const res = await fetch('/api/notes')
+        if (!res.ok) throw new Error(await responseError(res))
+        const rows: Note[] = await res.json()
+        if (ignore) return
+        setNotes(rows.map((n) => ({ ...n, text: n.text ?? '', images: n.images ?? [] })))
+      } catch (error) {
+        console.error(error)
+        if (!ignore) setToast('地点データを読み込めませんでした')
+      } finally {
+        if (!ignore) setLoading(false)
+      }
+    }
+
+    load()
+    return () => { ignore = true }
   }, [])
+
+  const filteredNotes = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return notes
+    return notes.filter((note) => note.text.toLowerCase().includes(q))
+  }, [notes, query])
 
   /* 全体フィット（1回だけ） */
   useFitBounds(notes, mapRef)
@@ -219,16 +281,29 @@ export default function Map() {
   const deleteImg = useCallback(
     async (noteId: string, img: Image) => {
       if (!canEdit) return
-      await fetch(`/api/images/${img.id}`, { method: 'DELETE' })
-      setNotes((arr) =>
-        arr.map((n) =>
-          n.id === noteId
-            ? { ...n, images: n.images.filter((i) => i.id !== img.id) }
-            : n,
-        ),
-      )
+      setSavingId(noteId)
+      try {
+        const res = await fetch(`/api/images/${img.id}`, {
+          method: 'DELETE',
+          headers: authHeaders(),
+        })
+        if (!res.ok) throw new Error(await responseError(res))
+        setNotes((arr) =>
+          arr.map((n) =>
+            n.id === noteId
+              ? { ...n, images: n.images.filter((i) => i.id !== img.id) }
+              : n,
+          ),
+        )
+        setToast('画像を削除しました')
+      } catch (error) {
+        console.error(error)
+        setToast('画像削除に失敗しました')
+      } finally {
+        setSavingId(null)
+      }
     },
-    [canEdit],
+    [authHeaders, canEdit],
   )
 
   /* ── helper: ノート削除 ── */
@@ -236,89 +311,110 @@ export default function Map() {
     async (id: string) => {
       if (!canEdit) return
       if (!confirm('この地点を削除しますか？')) return
-      await fetch(`/api/notes/${id}`, { method: 'DELETE' })
-      setNotes((arr) => arr.filter((n) => n.id !== id))
+      setSavingId(id)
+      try {
+        const res = await fetch(`/api/notes/${id}`, {
+          method: 'DELETE',
+          headers: authHeaders(),
+        })
+        if (!res.ok) throw new Error(await responseError(res))
+        setNotes((arr) => arr.filter((n) => n.id !== id))
+        setToast('地点を削除しました')
+      } catch (error) {
+        console.error(error)
+        setToast('地点削除に失敗しました')
+      } finally {
+        setSavingId(null)
+      }
     },
-    [canEdit],
+    [authHeaders, canEdit],
   )
 
   /* ── helper: ノート / 画像 保存 ── */
   const saveNote = useCallback(
     async (note: Note, file?: File) => {
-      if (!canEdit) return
+      if (!canEdit) return false
+      setSavingId(note.id)
 
-      /* 1) 先に notes を upsert (FK 先を確保) */
-      const resNote = await fetch('/api/notes', {
-        method : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body   : JSON.stringify({
-          id: note.id,
-          lat: note.lat,
-          lng: note.lng,
-          text: note.text ?? '',
-        }),
-      })
-      if (!resNote.ok) {
-        setToast('ノート保存に失敗しました')
-        console.error(await resNote.text())
-        return
-      }
-
-      /* 2) 画像があればアップロード → images INSERT */
-      if (file) {
-        const blob = await resizeImage(file)
-        const { signedUrl, path } = await fetch('/api/upload-url', {
-          method: 'POST',
-          body  : JSON.stringify({ filename: `${note.id}-${Date.now()}.webp` }),
-        }).then((r) => r.json())
-
-        await fetch(signedUrl, { method: 'PUT', body: blob })
-
-        const img_url =
-          `${process.env.NEXT_PUBLIC_SUPABASE_URL}` +
-          `/storage/v1/object/public/photos/${path}`
-
-        const resImg = await fetch('/api/images', {
+      try {
+        const resNote = await fetch('/api/notes', {
           method : 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body   : JSON.stringify({ note_id: note.id, url: img_url }),
+          headers: authHeaders(true),
+          body   : JSON.stringify({
+            id: note.id,
+            lat: note.lat,
+            lng: note.lng,
+            text: note.text ?? '',
+          }),
         })
-        if (!resImg.ok) {
-          setToast('画像保存に失敗しました')
-          console.error(await resImg.text())
-          return
+        if (!resNote.ok) throw new Error(await responseError(resNote))
+
+        setNotes((arr) => arr.map((x) => x.id === note.id ? { ...x, text: note.text ?? '' } : x))
+
+        if (file) {
+          const blob = await resizeImage(file)
+          const uploadRes = await fetch('/api/upload-url', {
+            method: 'POST',
+            headers: authHeaders(true),
+            body  : JSON.stringify({ filename: `${note.id}-${Date.now()}.webp` }),
+          })
+          if (!uploadRes.ok) throw new Error(await responseError(uploadRes))
+          const { signedUrl, path } = await uploadRes.json()
+
+          const putRes = await fetch(signedUrl, { method: 'PUT', body: blob })
+          if (!putRes.ok) throw new Error('画像アップロードに失敗しました')
+
+          const imgUrl =
+            `${process.env.NEXT_PUBLIC_SUPABASE_URL}` +
+            `/storage/v1/object/public/photos/${path}`
+
+          const resImg = await fetch('/api/images', {
+            method : 'POST',
+            headers: authHeaders(true),
+            body   : JSON.stringify({ note_id: note.id, url: imgUrl }),
+          })
+          if (!resImg.ok) throw new Error(await responseError(resImg))
+          const { id: imgId } = await resImg.json()
+
+          setNotes((arr) =>
+            arr.map((x) =>
+              x.id === note.id
+                ? { ...x, images: [...x.images, { id: imgId, url: imgUrl }] }
+                : x,
+            ),
+          )
         }
-        const { id: imgId } = await resImg.json()
 
-        setNotes((arr) =>
-          arr.map((x) =>
-            x.id === note.id
-              ? { ...x, images: [...x.images, { id: imgId, url: img_url }] }
-              : x,
-          ),
-        )
+        setToast('保存しました')
+        return true
+      } catch (error) {
+        console.error(error)
+        setToast(error instanceof Error && error.message === 'ログインが必要です'
+          ? 'ログインし直してください'
+          : '保存に失敗しました')
+        return false
+      } finally {
+        setSavingId(null)
       }
-
-      setToast('保存しました')
     },
-    [canEdit],
+    [authHeaders, canEdit],
   )
+
+  const addDraftNote = useCallback((lat: number, lng: number) => {
+    if (!canEdit) return
+    const id = crypto.randomUUID()
+    setNotes((arr) => [
+      ...arr,
+      { id, lat, lng, text: '', images: [] },
+    ])
+    setTimeout(() => popupRefs.current[id]?.openOn(mapRef.current!), 0)
+  }, [canEdit])
 
   /* ── 地図クリックで仮ノート ── */
   function ClickHandler() {
     useMapEvents({
       click(e) {
-        if (!canEdit) return
-        setNotes((arr) => [
-          ...arr,
-          {
-            id: crypto.randomUUID(),
-            lat: e.latlng.lat,
-            lng: e.latlng.lng,
-            text: '',
-            images: [],
-          },
-        ])
+        addDraftNote(e.latlng.lat, e.latlng.lng)
       },
     })
     return null
@@ -330,21 +426,25 @@ export default function Map() {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const { latitude, longitude } = pos.coords
-        setNotes((arr) => [
-          ...arr,
-          {
-            id: crypto.randomUUID(),
-            lat: latitude,
-            lng: longitude,
-            text: '',
-            images: [],
-          },
-        ])
+        addDraftNote(latitude, longitude)
         mapRef.current?.flyTo([latitude, longitude], 18)
       },
-      () => alert('位置情報取得失敗'),
+      () => setToast('位置情報を取得できませんでした'),
+      { enableHighAccuracy: true, timeout: 10000 },
     )
-  }, [canEdit])
+  }, [addDraftNote, canEdit])
+
+  const centerCurrent = useCallback(() => {
+    navigator.geolocation.getCurrentPosition(
+      (pos) =>
+        mapRef.current?.flyTo(
+          [pos.coords.latitude, pos.coords.longitude],
+          15,
+        ),
+      () => setToast('位置情報を取得できませんでした'),
+      { enableHighAccuracy: true, timeout: 10000 },
+    )
+  }, [])
 
   /* ── PopupContent を別コンポーネントに（Hooks 安全に使うため） ── */
   const PopupContent = ({
@@ -355,53 +455,61 @@ export default function Map() {
     close: () => void
   }) => {
     const [pending, setPending] = useState<File | null>(null)
+    const [text, setText] = useState(note.text)
+    const busy = savingId === note.id
 
     return (
-      <>
-        {note.images.length > 0 && (
-          <div onClick={() => setPreview(note.images[0].url)}>
-            <Carousel
-              canEdit={canEdit}
-              imgs={note.images}
-              onPreview={setPreview}
-              onDelete={(img) => deleteImg(note.id, img)}
-            />
+      <div className="w-[min(78vw,300px)]">
+        {note.images.length > 0 ? (
+          <Carousel
+            canEdit={canEdit && !busy}
+            imgs={note.images}
+            onPreview={setPreview}
+            onDelete={(img) => deleteImg(note.id, img)}
+          />
+        ) : (
+          <div className="mb-2 flex h-24 items-center justify-center rounded border border-dashed bg-gray-50 text-sm text-gray-500">
+            画像なし
           </div>
         )}
 
         {pending && (
-          <p className="text-xs text-blue-600 mb-1">
-            新しい画像が選択されました
+          <p className="mb-1 text-xs text-blue-600">
+            選択中: {pending.name}
           </p>
         )}
 
         <textarea
-          defaultValue={note.text}
+          value={text}
           placeholder={canEdit ? '説明を入力' : '閲覧モードでは編集不可'}
-          className={`w-full border p-1 text-sm mb-2 ${
+          className={`mb-2 min-h-24 w-full resize-y rounded border p-2 text-sm ${
             canEdit ? '' : 'bg-gray-100'
           }`}
-          readOnly={!canEdit}
-          onBlur={(e) => (note.text = e.target.value)}
+          readOnly={!canEdit || busy}
+          onChange={(e) => setText(e.target.value)}
         />
 
         {canEdit ? (
           <>
-            <FileButton disabled={!canEdit} onSelect={setPending} />
+            <FileButton disabled={busy} onSelect={setPending} />
             <button
-              className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded w-full mt-2"
+              type="button"
+              disabled={busy}
+              className="mt-2 w-full rounded bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-700 disabled:cursor-wait disabled:opacity-60"
               onClick={async () => {
-                await saveNote(note, pending ?? undefined)
+                const ok = await saveNote({ ...note, text }, pending ?? undefined)
+                if (!ok) return
                 setPending(null)
                 close()
               }}
             >
-              保存して閉じる
+              {busy ? '保存中...' : '保存して閉じる'}
             </button>
           </>
         ) : (
           <button
-            className="px-3 py-1 bg-gray-400 text-white text-sm rounded w-full mt-2"
+            type="button"
+            className="mt-2 w-full rounded bg-gray-500 px-3 py-2 text-sm text-white"
             onClick={close}
           >
             閉じる
@@ -410,33 +518,35 @@ export default function Map() {
 
         {canEdit && (
           <button
-            className="mt-2 w-full flex items-center justify-center gap-1 text-sm text-red-600"
+            type="button"
+            disabled={busy}
+            className="mt-2 flex w-full items-center justify-center gap-1 text-sm text-red-600 disabled:opacity-50"
             onClick={() => deleteNote(note.id)}
           >
             <IoTrashOutline />
-            ノート削除
+            地点削除
           </button>
         )}
-      </>
+      </div>
     )
   }
 
   /* ───────────────────────────── JSX ───────────────────────────── */
   return (
-    <>
+    <div className="relative h-full min-h-[calc(100vh-96px)] overflow-hidden">
       {/* ── プレビュー ── */}
       {preview && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[1000]">
+        <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/85 p-4">
           <img
             src={preview}
-            alt=""
-            className="max-h-[80vh] max-w-[90vw]"
+            alt="地点写真の拡大表示"
+            className="max-h-[86vh] max-w-[94vw] object-contain"
           />
 
-          {'canShare' in navigator && (
+          {'share' in navigator && 'canShare' in navigator && (
             <button
-              className="absolute bottom-6 left-1/2 -translate-x-1/2
-                         bg-white/90 px-4 py-1 rounded shadow text-sm"
+              type="button"
+              className="absolute bottom-6 left-1/2 -translate-x-1/2 rounded bg-white/90 px-4 py-2 text-sm shadow"
               onClick={async () => {
                 const blob = await fetch(preview).then((r) => r.blob())
                 await navigator.share({
@@ -450,7 +560,9 @@ export default function Map() {
           )}
 
           <button
-            className="absolute top-4 right-4 text-white text-3xl"
+            type="button"
+            aria-label="プレビューを閉じる"
+            className="absolute right-4 top-4 text-3xl text-white"
             onClick={() => setPreview(null)}
           >
             <IoClose />
@@ -458,62 +570,108 @@ export default function Map() {
         </div>
       )}
 
-      {/* ── Toast ── */}
       <Toast message={toast} onDone={() => setToast('')} />
 
-      {/* ── 現在地ピン & Center ── */}
-      {canEdit && (
+      <div className="absolute left-3 top-3 z-[1000] flex max-w-[calc(100vw-1.5rem)] flex-wrap items-center gap-2">
         <button
-          className="fixed bottom-16 right-4 z-[1000]
-                     bg-green-600 hover:bg-green-700 text-white
-                     w-16 h-16 text-3xl rounded-full shadow-lg
-                     flex items-center justify-center"
-          title="現在地にピンを追加"
-          onClick={addCurrent}
+          type="button"
+          className="flex items-center gap-2 rounded bg-white px-3 py-2 text-sm shadow hover:bg-gray-50"
+          onClick={() => setShowList((v) => !v)}
         >
-          📌
+          <IoListOutline />
+          地点 {notes.length}
         </button>
+        <span className={`rounded px-3 py-2 text-xs shadow ${canEdit ? 'bg-indigo-600 text-yellow-100' : 'bg-white text-gray-700'}`}>
+          {canEdit ? '編集モード' : '閲覧モード'}
+        </span>
+        {loading && <span className="rounded bg-white px-3 py-2 text-xs shadow">読み込み中...</span>}
+      </div>
+
+      {showList && (
+        <aside className="absolute left-3 top-16 z-[1000] flex max-h-[min(70vh,520px)] w-[min(92vw,360px)] flex-col rounded bg-white shadow-xl">
+          <div className="border-b p-3">
+            <label className="flex items-center gap-2 rounded border px-2 py-1 text-sm">
+              <IoSearchOutline className="text-gray-500" />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                className="w-full outline-none"
+                placeholder="メモを検索"
+              />
+            </label>
+          </div>
+          <div className="overflow-y-auto p-2">
+            {filteredNotes.length === 0 ? (
+              <p className="p-3 text-sm text-gray-500">該当する地点がありません</p>
+            ) : filteredNotes.map((note) => (
+              <button
+                type="button"
+                key={note.id}
+                className="mb-1 block w-full rounded px-3 py-2 text-left hover:bg-gray-100"
+                onClick={() => openNote(note)}
+              >
+                <span className="block truncate text-sm font-medium">
+                  {note.text.trim() || '説明なしの地点'}
+                </span>
+                <span className="text-xs text-gray-500">
+                  {note.images.length}枚 / {note.lat.toFixed(5)}, {note.lng.toFixed(5)}
+                </span>
+              </button>
+            ))}
+          </div>
+        </aside>
       )}
 
-      <button
-        className="fixed bottom-4 right-4 z-[1000] bg-white p-2 rounded shadow"
-        onClick={() =>
-          navigator.geolocation.getCurrentPosition(
-            (pos) =>
-              mapRef.current?.flyTo(
-                [pos.coords.latitude, pos.coords.longitude],
-                15,
-              ),
-            () => alert('位置情報取得失敗'),
-          )
-        }
-      >
-        📍 Center
-      </button>
+      {/* ── 現在地ピン & Center ── */}
+      <div className="absolute bottom-4 right-4 z-[1000] flex flex-col gap-2">
+        {canEdit && (
+          <button
+            type="button"
+            className="flex h-12 w-12 items-center justify-center rounded-full bg-green-600 text-2xl text-white shadow-lg hover:bg-green-700"
+            title="現在地にピンを追加"
+            aria-label="現在地にピンを追加"
+            onClick={addCurrent}
+          >
+            <IoAdd />
+          </button>
+        )}
+
+        <button
+          type="button"
+          className="flex h-12 w-12 items-center justify-center rounded-full bg-white text-2xl text-gray-800 shadow-lg hover:bg-gray-50"
+          title="現在地へ移動"
+          aria-label="現在地へ移動"
+          onClick={centerCurrent}
+        >
+          <IoLocateOutline />
+        </button>
+      </div>
 
       {/* ── 地図本体 ── */}
       <MapContainer
         ref={mapRef}
         center={[36.07, 140.11]}
         zoom={13}
-        className="h-screen"
+        className="h-full min-h-[calc(100vh-96px)]"
       >
-        <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+        <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        />
         {canEdit && <ClickHandler />}
 
         {notes.map((n) => (
           <Marker key={n.id} position={[n.lat, n.lng]}>
             <Popup
-              /* ref: 型エラーを避けるため void を返すだけ */
               ref={(p) => {
                 if (p) popupRefs.current[n.id] = p
                 return undefined
               }}
               minWidth={260}
-              maxWidth={320}
+              maxWidth={340}
               autoClose={false}
               closeOnClick={false}
-              className="max-w-[90vw] sm:max-w-[320px]"
+              className="max-w-[90vw] sm:max-w-[340px]"
             >
               <PopupContent
                 note={n}
@@ -523,6 +681,6 @@ export default function Map() {
           </Marker>
         ))}
       </MapContainer>
-    </>
+    </div>
   )
 }
