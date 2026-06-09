@@ -5,7 +5,7 @@ import HeaderBar from '@/components/HeaderBar'
 import { AuthProvider } from '@/contexts/AuthContext'
 
 export const metadata = {
-  title: '勘翁マップアプリ',
+  title: '勘翁マップアプリ β',
   description: 'map app by takam1602',
   verification:{
       google:"3ITIM0eNhLXG7UpZW7hjxVztQhiSe9Ajga0j3aIicIw",

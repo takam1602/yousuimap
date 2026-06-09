@@ -7,9 +7,9 @@ export default function Home() {
     <div className="min-h-[calc(100vh-96px)] bg-slate-50 text-gray-900">
       <section className="border-b bg-white">
         <div className="mx-auto max-w-5xl px-4 py-8">
-          <h2 className="text-2xl font-bold sm:text-3xl">用水路マップ</h2>
+          <h2 className="text-2xl font-bold sm:text-3xl">用水路のピン</h2>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-600">
-            記録したい用水路を選んで、地点・写真・メモを閲覧、追加、編集できます。
+            閲覧したい用水路を選択してください。ピンをクリックすると、写真やメモを閲覧できます。追加は管理者のみです。
           </p>
         </div>
       </section>

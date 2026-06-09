@@ -94,6 +94,16 @@ async function responseError(res: Response) {
   }
 }
 
+const NOTE_IMPORT_SAVE_BATCH_SIZE = 500
+
+function chunkArray<T>(items: T[], size: number) {
+  const chunks: T[][] = []
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size))
+  }
+  return chunks
+}
+
 /* ───────────────────────────────────── */
 /* Re-usable FileButton                                                      */
 /* ───────────────────────────────────── */
@@ -448,26 +458,20 @@ export default function Map({
 
       const result: {
         listName: string | null
-        places: Array<{ lat: number; lng: number; name: string | null; address?: string | null; resolvedUrl: string }>
+        places: Array<{ lat: number; lng: number; name: string | null }>
         resolvedUrl: string
+        totalCount?: number | null
       } = await res.json()
 
       const existing = new Set(notes.map((note) => `${note.lat.toFixed(7)},${note.lng.toFixed(7)}`))
       const imported = result.places
         .filter((place) => !existing.has(`${place.lat.toFixed(7)},${place.lng.toFixed(7)}`))
         .map((place) => {
-          const text = [
-            place.name,
-            place.address && place.address !== place.name ? place.address : null,
-            result.listName ? `Google Maps リスト: ${result.listName}` : 'Google Maps から取り込み',
-            place.resolvedUrl || result.resolvedUrl,
-          ].filter(Boolean).join('\n')
-
           return {
             id: crypto.randomUUID(),
             lat: place.lat,
             lng: place.lng,
-            text,
+            text: place.name?.trim() ?? '',
             images: [],
           }
         })
@@ -477,12 +481,14 @@ export default function Map({
         return
       }
 
-      const saveRes = await fetch(notesEndpoint, {
-        method: 'POST',
-        headers: authHeaders(true),
-        body: JSON.stringify(imported.map(({ id, lat, lng, text }) => ({ id, lat, lng, text }))),
-      })
-      if (!saveRes.ok) throw new Error(await responseError(saveRes))
+      for (const batch of chunkArray(imported, NOTE_IMPORT_SAVE_BATCH_SIZE)) {
+        const saveRes = await fetch(notesEndpoint, {
+          method: 'POST',
+          headers: authHeaders(true),
+          body: JSON.stringify(batch.map(({ id, lat, lng, text }) => ({ id, lat, lng, text }))),
+        })
+        if (!saveRes.ok) throw new Error(await responseError(saveRes))
+      }
 
       setNotes((arr) => [...arr, ...imported])
       setGoogleMapUrl('')
@@ -490,7 +496,12 @@ export default function Map({
       const first = imported[0]
       mapRef.current?.flyTo([first.lat, first.lng], result.places.length > 1 ? 12 : 17)
       setTimeout(() => popupRefs.current[first.id]?.openOn(mapRef.current!), 100)
-      setToast(`${imported.length}件の地点を追加しました`)
+      const skippedCount = result.places.length - imported.length
+      const partialCount = result.totalCount && result.places.length < result.totalCount
+        ? `（Google Maps 側の${result.totalCount}件中${result.places.length}件を取得）`
+        : ''
+      const skippedText = skippedCount > 0 ? `（既存${skippedCount}件を除外）` : ''
+      setToast(`${imported.length}件の地点を追加しました${skippedText}${partialCount}`)
     } catch (error) {
       console.error(error)
       setToast(error instanceof Error ? error.message : 'Google Maps リンクを読み取れませんでした')

@@ -5,7 +5,6 @@ type ParsedPlace = {
   lat: number
   lng: number
   name: string | null
-  address?: string | null
   resolvedUrl: string
 }
 
@@ -13,7 +12,11 @@ type ParsedGoogleMapLink = {
   listName: string | null
   places: ParsedPlace[]
   resolvedUrl: string
+  totalCount?: number | null
 }
+
+const GOOGLE_MAPS_LIST_FETCH_LIMIT = 10000
+const GOOGLE_MAPS_LIST_ABSOLUTE_LIMIT = 20000
 
 function validCoordinate(lat: number, lng: number) {
   return Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180
@@ -45,6 +48,26 @@ function cleanupName(name: string | null) {
     .replace(/\s+/g, ' ')
     .trim()
   return cleaned || null
+}
+
+function isGenericGoogleName(name: string) {
+  return /^(Dropped pin|Google Maps|Google Maps saved place)$/i.test(name.trim())
+}
+
+function isCoordinateLikeName(name: string) {
+  const value = name.trim()
+  return (
+    /^-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?$/.test(value)
+    || /\d+[°º].*[NSEW]/i.test(value)
+    || /^N\d+[°º]/i.test(value)
+  )
+}
+
+function cleanupImportedLabel(name: string | null) {
+  const cleaned = cleanupName(name)
+  if (!cleaned) return null
+  if (isGenericGoogleName(cleaned) || isCoordinateLikeName(cleaned)) return null
+  return cleaned
 }
 
 function pickNameFromUrl(url: string) {
@@ -83,6 +106,22 @@ function extractGetListUrl(html: string) {
   return new URL(htmlDecode(match[1]), 'https://www.google.com').toString()
 }
 
+function withGoogleMapsListLimit(url: string, limit: number) {
+  try {
+    const parsed = new URL(url)
+    const pb = parsed.searchParams.get('pb')
+    if (!pb) return url
+
+    const nextPb = /!4i\d+/.test(pb)
+      ? pb.replace(/!4i\d+/g, `!4i${limit}`)
+      : `${pb}!4i${limit}`
+    parsed.searchParams.set('pb', nextPb)
+    return parsed.toString()
+  } catch {
+    return url
+  }
+}
+
 function stripGoogleJsonPrefix(text: string) {
   if (!text.startsWith(")]}'")) return text
   const newline = text.indexOf('\n')
@@ -109,6 +148,21 @@ function extractListName(payload: unknown) {
   return found
 }
 
+function extractListTotalCount(payload: unknown) {
+  let found: number | null = null
+
+  function visit(value: unknown) {
+    if (!Array.isArray(value)) return
+    if (Array.isArray(value[8]) && typeof value[12] === 'number' && value[12] >= 0) {
+      found = Math.max(found ?? 0, value[12])
+    }
+    for (const child of value) visit(child)
+  }
+
+  visit(payload)
+  return found
+}
+
 function extractPlacesFromListPayload(payload: unknown, resolvedUrl: string) {
   const places: ParsedPlace[] = []
   const seen = new Set<string>()
@@ -124,15 +178,12 @@ function extractPlacesFromListPayload(payload: unknown, resolvedUrl: string) {
     if (validCoordinate(lat, lng)) {
       const rawName = itemText(value[2])
       const memo = Array.isArray(details) ? itemText(details[2]) : null
-      const address = Array.isArray(details) ? itemText(details[4]) : null
-      const name = rawName && rawName !== 'Dropped pin'
-        ? rawName
-        : memo ?? address ?? rawName ?? 'Google Maps saved place'
+      const name = cleanupImportedLabel(rawName) ?? cleanupImportedLabel(memo)
       const key = `${lat.toFixed(7)},${lng.toFixed(7)},${name}`
 
       if (!seen.has(key)) {
         seen.add(key)
-        places.push({ lat, lng, name, address, resolvedUrl })
+        places.push({ lat, lng, name, resolvedUrl })
       }
     }
 
@@ -174,7 +225,7 @@ async function parseGoogleMapUrl(rawUrl: string): Promise<ParsedGoogleMapLink> {
   if (directCoordinate) {
     return {
       listName: null,
-      places: [{ ...directCoordinate, name: directName, resolvedUrl: input.toString() }],
+      places: [{ ...directCoordinate, name: cleanupImportedLabel(directName), resolvedUrl: input.toString() }],
       resolvedUrl: input.toString(),
     }
   }
@@ -185,20 +236,27 @@ async function parseGoogleMapUrl(rawUrl: string): Promise<ParsedGoogleMapLink> {
   if (urlCoordinate) {
     return {
       listName: null,
-      places: [{ ...urlCoordinate, name: urlName, resolvedUrl: page.resolvedUrl }],
+      places: [{ ...urlCoordinate, name: cleanupImportedLabel(urlName), resolvedUrl: page.resolvedUrl }],
       resolvedUrl: page.resolvedUrl,
     }
   }
 
   const getListUrl = extractGetListUrl(page.text)
   if (getListUrl) {
-    const list = await fetchText(getListUrl)
-    const payload = JSON.parse(stripGoogleJsonPrefix(list.text))
-    const places = extractPlacesFromListPayload(payload, page.resolvedUrl)
+    let list = await fetchText(withGoogleMapsListLimit(getListUrl, GOOGLE_MAPS_LIST_FETCH_LIMIT))
+    let payload = JSON.parse(stripGoogleJsonPrefix(list.text))
+    let places = extractPlacesFromListPayload(payload, page.resolvedUrl)
+    const totalCount = extractListTotalCount(payload)
     const listName = extractListName(payload)
 
+    if (totalCount && places.length < totalCount && totalCount <= GOOGLE_MAPS_LIST_ABSOLUTE_LIMIT) {
+      list = await fetchText(withGoogleMapsListLimit(getListUrl, totalCount))
+      payload = JSON.parse(stripGoogleJsonPrefix(list.text))
+      places = extractPlacesFromListPayload(payload, page.resolvedUrl)
+    }
+
     if (places.length > 0) {
-      return { listName, places, resolvedUrl: page.resolvedUrl }
+      return { listName, places, resolvedUrl: page.resolvedUrl, totalCount }
     }
   }
 
@@ -208,7 +266,7 @@ async function parseGoogleMapUrl(rawUrl: string): Promise<ParsedGoogleMapLink> {
       listName: null,
       places: [{
         ...htmlCoordinate,
-        name: urlName ?? pickNameFromHtml(page.text),
+        name: cleanupImportedLabel(urlName ?? pickNameFromHtml(page.text)),
         resolvedUrl: page.resolvedUrl,
       }],
       resolvedUrl: page.resolvedUrl,
