@@ -44,3 +44,17 @@ Workflow には GitHub Secrets として以下が必要です。
 
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
+
+
+## 複数マップのデータ分離
+
+複数の用水路マップは `notes.map_slug` で分離します。既存の土浦用水データは `tsuchiura-yosui` として扱います。Supabase に反映する SQL は `supabase/migrations/20260609000000_add_map_slug_to_notes.sql` です。
+
+現在登録しているマップは以下です。
+
+- `tsuchiura-yosui`: 土浦用水
+- `kasumigaura-yosui`: 霞ヶ浦用水
+- `minuma-daiyosui`: 見沼代用水
+- `ishioka-daichi-yosui`: 石岡台地用水
+
+新しいマップを追加する場合は `src/lib/waterwayMaps.ts` に設定を追加してください。

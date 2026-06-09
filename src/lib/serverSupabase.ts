@@ -13,22 +13,26 @@ export function createSupabaseAdmin() {
   return createClient(supabaseUrl, serviceRoleKey)
 }
 
-export async function requireEditor(req: NextRequest) {
-  if (!supabaseUrl || !anonKey) {
-    return {
-      error: NextResponse.json(
-        { error: 'Supabase auth environment variables are missing' },
-        { status: 500 },
-      ),
-    }
-  }
+export function hasSupabaseServerEnv() {
+  return Boolean(supabaseUrl && serviceRoleKey)
+}
 
+export async function requireEditor(req: NextRequest) {
   const authHeader = req.headers.get('authorization')
   const token = authHeader?.match(/^Bearer\s+(.+)$/i)?.[1]
 
   if (!token) {
     return {
       error: NextResponse.json({ error: 'Login is required' }, { status: 401 }),
+    }
+  }
+
+  if (!supabaseUrl || !anonKey) {
+    return {
+      error: NextResponse.json(
+        { error: 'Supabase auth environment variables are missing' },
+        { status: 500 },
+      ),
     }
   }
 

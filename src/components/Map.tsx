@@ -23,6 +23,7 @@ import {
   IoAdd,
   IoClose,
   IoImageOutline,
+  IoLinkOutline,
   IoListOutline,
   IoLocateOutline,
   IoSearchOutline,
@@ -42,12 +43,20 @@ import {
 import { useAuth }      from '@/contexts/AuthContext'
 import useFitBounds      from '@/components/useFitBounds'
 import Toast             from '@/components/Toast'
+import { DEFAULT_MAP_SLUG } from '@/lib/waterwayMaps'
 
 /* ───────────────────────────────────── */
 /* 型定義                                                                   */
 /* ───────────────────────────────────── */
 interface Image { id: string; url: string }
 interface Note  { id: string; lat: number; lng: number; text: string; images: Image[] }
+
+type MapProps = {
+  mapSlug?: string
+  mapTitle?: string
+  initialCenter?: [number, number]
+  initialZoom?: number
+}
 
 async function resizeImage(
   file: File,
@@ -76,11 +85,12 @@ async function resizeImage(
 }
 
 async function responseError(res: Response) {
+  const text = await res.text()
   try {
-    const body = await res.json()
+    const body = JSON.parse(text)
     return body?.error?.message ?? body?.error ?? body?.selErr?.message ?? body?.delErr?.message ?? res.statusText
   } catch {
-    return await res.text() || res.statusText
+    return text || res.statusText
   }
 }
 
@@ -215,7 +225,12 @@ const Carousel = memo(function Carousel({
 /* ───────────────────────────────────── */
 /*                Main Map               */
 /* ───────────────────────────────────── */
-export default function Map() {
+export default function Map({
+  mapSlug = DEFAULT_MAP_SLUG,
+  mapTitle = '土浦用水',
+  initialCenter = [36.07, 140.11],
+  initialZoom = 13,
+}: MapProps) {
   const { session, user } = useAuth()
   const canEdit  = !!user
 
@@ -225,10 +240,16 @@ export default function Map() {
   const [preview, setPreview] = useState<string | null>(null)
   const [showList, setShowList] = useState(false)
   const [query, setQuery] = useState('')
+  const [googleMapUrl, setGoogleMapUrl] = useState('')
+  const [googleImporting, setGoogleImporting] = useState(false)
   const [savingId, setSavingId] = useState<string | null>(null)
 
   const mapRef    = useRef<LeafletMap | null>(null)
   const popupRefs = useRef<Record<string, L.Popup>>({})
+  const notesEndpoint = useMemo(
+    () => `/api/notes?map=${encodeURIComponent(mapSlug)}`,
+    [mapSlug],
+  )
 
   const authHeaders = useCallback((json = false) => {
     if (!session?.access_token) throw new Error('ログインが必要です')
@@ -251,7 +272,7 @@ export default function Map() {
     async function load() {
       setLoading(true)
       try {
-        const res = await fetch('/api/notes')
+        const res = await fetch(notesEndpoint)
         if (!res.ok) throw new Error(await responseError(res))
         const rows: Note[] = await res.json()
         if (ignore) return
@@ -266,7 +287,7 @@ export default function Map() {
 
     load()
     return () => { ignore = true }
-  }, [])
+  }, [notesEndpoint])
 
   const filteredNotes = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -303,7 +324,7 @@ export default function Map() {
         setSavingId(null)
       }
     },
-    [authHeaders, canEdit],
+    [authHeaders, canEdit, notesEndpoint],
   )
 
   /* ── helper: ノート削除 ── */
@@ -337,7 +358,7 @@ export default function Map() {
       setSavingId(note.id)
 
       try {
-        const resNote = await fetch('/api/notes', {
+        const resNote = await fetch(notesEndpoint, {
           method : 'POST',
           headers: authHeaders(true),
           body   : JSON.stringify({
@@ -397,18 +418,86 @@ export default function Map() {
         setSavingId(null)
       }
     },
-    [authHeaders, canEdit],
+    [authHeaders, canEdit, notesEndpoint],
   )
 
-  const addDraftNote = useCallback((lat: number, lng: number) => {
-    if (!canEdit) return
-    const id = crypto.randomUUID()
-    setNotes((arr) => [
-      ...arr,
-      { id, lat, lng, text: '', images: [] },
-    ])
-    setTimeout(() => popupRefs.current[id]?.openOn(mapRef.current!), 0)
+  const addDraftNote = useCallback((lat: number, lng: number, text = '') => {
+    if (!canEdit) return null
+    const note = { id: crypto.randomUUID(), lat, lng, text, images: [] }
+    setNotes((arr) => [...arr, note])
+    setTimeout(() => popupRefs.current[note.id]?.openOn(mapRef.current!), 0)
+    return note
   }, [canEdit])
+
+  const importGoogleMapLink = useCallback(async () => {
+    if (!canEdit || googleImporting) return
+    const url = googleMapUrl.trim()
+    if (!url) {
+      setToast('Google Maps のリンクを貼り付けてください')
+      return
+    }
+
+    setGoogleImporting(true)
+    try {
+      const res = await fetch('/api/google-map-link', {
+        method: 'POST',
+        headers: authHeaders(true),
+        body: JSON.stringify({ url }),
+      })
+      if (!res.ok) throw new Error(await responseError(res))
+
+      const result: {
+        listName: string | null
+        places: Array<{ lat: number; lng: number; name: string | null; address?: string | null; resolvedUrl: string }>
+        resolvedUrl: string
+      } = await res.json()
+
+      const existing = new Set(notes.map((note) => `${note.lat.toFixed(7)},${note.lng.toFixed(7)}`))
+      const imported = result.places
+        .filter((place) => !existing.has(`${place.lat.toFixed(7)},${place.lng.toFixed(7)}`))
+        .map((place) => {
+          const text = [
+            place.name,
+            place.address && place.address !== place.name ? place.address : null,
+            result.listName ? `Google Maps リスト: ${result.listName}` : 'Google Maps から取り込み',
+            place.resolvedUrl || result.resolvedUrl,
+          ].filter(Boolean).join('\n')
+
+          return {
+            id: crypto.randomUUID(),
+            lat: place.lat,
+            lng: place.lng,
+            text,
+            images: [],
+          }
+        })
+
+      if (imported.length === 0) {
+        setToast('追加できる新しい地点がありませんでした')
+        return
+      }
+
+      const saveRes = await fetch(notesEndpoint, {
+        method: 'POST',
+        headers: authHeaders(true),
+        body: JSON.stringify(imported.map(({ id, lat, lng, text }) => ({ id, lat, lng, text }))),
+      })
+      if (!saveRes.ok) throw new Error(await responseError(saveRes))
+
+      setNotes((arr) => [...arr, ...imported])
+      setGoogleMapUrl('')
+
+      const first = imported[0]
+      mapRef.current?.flyTo([first.lat, first.lng], result.places.length > 1 ? 12 : 17)
+      setTimeout(() => popupRefs.current[first.id]?.openOn(mapRef.current!), 100)
+      setToast(`${imported.length}件の地点を追加しました`)
+    } catch (error) {
+      console.error(error)
+      setToast(error instanceof Error ? error.message : 'Google Maps リンクを読み取れませんでした')
+    } finally {
+      setGoogleImporting(false)
+    }
+  }, [authHeaders, canEdit, googleImporting, googleMapUrl, notes, notesEndpoint])
 
   /* ── 地図クリックで仮ノート ── */
   function ClickHandler() {
@@ -573,6 +662,9 @@ export default function Map() {
       <Toast message={toast} onDone={() => setToast('')} />
 
       <div className="absolute left-3 top-3 z-[1000] flex max-w-[calc(100vw-1.5rem)] flex-wrap items-center gap-2">
+        <span className="rounded bg-white px-3 py-2 text-sm font-semibold shadow">
+          {mapTitle}
+        </span>
         <button
           type="button"
           className="flex items-center gap-2 rounded bg-white px-3 py-2 text-sm shadow hover:bg-gray-50"
@@ -586,6 +678,37 @@ export default function Map() {
         </span>
         {loading && <span className="rounded bg-white px-3 py-2 text-xs shadow">読み込み中...</span>}
       </div>
+
+      {canEdit && (
+        <form
+          className="absolute right-3 top-28 z-[1000] w-[min(92vw,420px)] rounded bg-white p-3 shadow-xl sm:top-3"
+          onSubmit={(e) => {
+            e.preventDefault()
+            importGoogleMapLink()
+          }}
+        >
+          <label className="mb-2 flex items-center gap-2 text-sm font-medium text-gray-700">
+            <IoLinkOutline />
+            Google Maps リンクから追加
+          </label>
+          <div className="flex gap-2">
+            <input
+              value={googleMapUrl}
+              onChange={(e) => setGoogleMapUrl(e.target.value)}
+              className="min-w-0 flex-1 rounded border px-3 py-2 text-sm outline-none focus:border-blue-500"
+              placeholder="https://maps.app.goo.gl/..."
+              disabled={googleImporting}
+            />
+            <button
+              type="submit"
+              disabled={googleImporting}
+              className="shrink-0 rounded bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-700 disabled:cursor-wait disabled:opacity-60"
+            >
+              {googleImporting ? '読取中' : '追加'}
+            </button>
+          </div>
+        </form>
+      )}
 
       {showList && (
         <aside className="absolute left-3 top-16 z-[1000] flex max-h-[min(70vh,520px)] w-[min(92vw,360px)] flex-col rounded bg-white shadow-xl">
@@ -650,8 +773,8 @@ export default function Map() {
       {/* ── 地図本体 ── */}
       <MapContainer
         ref={mapRef}
-        center={[36.07, 140.11]}
-        zoom={13}
+        center={initialCenter}
+        zoom={initialZoom}
         className="h-full min-h-[calc(100vh-96px)]"
       >
         <TileLayer
