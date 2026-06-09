@@ -9,12 +9,15 @@ import {
   IoArrowBackOutline,
   IoArrowDownOutline,
   IoArrowUpOutline,
+  IoBookmarkOutline,
   IoClose,
   IoCubeOutline,
   IoDownloadOutline,
+  IoImageOutline,
   IoListOutline,
   IoMapOutline,
   IoRefreshOutline,
+  IoSaveOutline,
   IoStatsChartOutline,
   IoSwapHorizontalOutline,
   IoTrashOutline,
@@ -93,7 +96,32 @@ type ProfileStats = {
   descent: number
 }
 
+type SavedRoutePoint = {
+  id: string
+  lat: number
+  lng: number
+  label: string
+  source: RoutePoint['source']
+}
+
+type SavedRouteProfile = {
+  id: string
+  name: string
+  points: SavedRoutePoint[]
+  createdAt: string
+  updatedAt: string
+}
+
+type ExportedMapImage = {
+  dataUrl: string
+  width: number
+  height: number
+}
+
+type MapExporter = () => Promise<ExportedMapImage>
+
 const MAP_SLUG = 'tsuchiura-yosui'
+const SAVED_PROFILES_STORAGE_KEY = `terrain-profiles:${MAP_SLUG}:v1`
 const THREE_URL = 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js'
 const DEM_ZOOM = 14
 const TERRAIN_ROWS = 56
@@ -227,6 +255,80 @@ function initialRouteFrom(points: TerrainPoint[]) {
     routeKey: `loaded-${point.id}-${index}`,
     source: 'note' as const,
   }))
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function normalizeSavedProfiles(value: unknown): SavedRouteProfile[] {
+  if (!Array.isArray(value)) return []
+
+  return value.flatMap((profile): SavedRouteProfile[] => {
+    if (!isRecord(profile) || typeof profile.id !== 'string' || typeof profile.name !== 'string') return []
+    if (!Array.isArray(profile.points)) return []
+
+    const points = profile.points.flatMap((point): SavedRoutePoint[] => {
+      if (!isRecord(point)) return []
+      const source = point.source === 'custom' ? 'custom' : 'note'
+      if (typeof point.id !== 'string' || typeof point.label !== 'string') return []
+      if (!Number.isFinite(point.lat) || !Number.isFinite(point.lng)) return []
+      return [{ id: point.id, lat: Number(point.lat), lng: Number(point.lng), label: point.label, source }]
+    })
+
+    if (points.length < 2) return []
+    const now = new Date().toISOString()
+    return [
+      {
+        id: profile.id,
+        name: profile.name.trim() || 'プロファイル',
+        points,
+        createdAt: typeof profile.createdAt === 'string' ? profile.createdAt : now,
+        updatedAt: typeof profile.updatedAt === 'string' ? profile.updatedAt : now,
+      },
+    ]
+  })
+}
+
+function loadSavedProfiles() {
+  if (typeof window === 'undefined') return []
+  try {
+    return normalizeSavedProfiles(JSON.parse(window.localStorage.getItem(SAVED_PROFILES_STORAGE_KEY) || '[]'))
+  } catch {
+    return []
+  }
+}
+
+function saveProfilesToStorage(profiles: SavedRouteProfile[]) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(SAVED_PROFILES_STORAGE_KEY, JSON.stringify(profiles))
+}
+
+function serializeRoutePoint(point: RoutePoint): SavedRoutePoint {
+  return { id: point.id, lat: point.lat, lng: point.lng, label: point.label, source: point.source }
+}
+
+function routePointFromSaved(point: SavedRoutePoint, index: number): RoutePoint {
+  return routePointFrom(
+    {
+      id: point.id || `saved-${index + 1}`,
+      lat: point.lat,
+      lng: point.lng,
+      label: point.label || `保存地点 ${index + 1}`,
+    },
+    index,
+    point.source
+  )
+}
+
+function nextProfileName(profiles: SavedRouteProfile[]) {
+  let index = profiles.length + 1
+  while (profiles.some((profile) => profile.name === `プロファイル ${index}`)) index += 1
+  return `プロファイル ${index}`
+}
+
+function createProfileId() {
+  return `profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
 function routeIsInitialFallback(routePoints: RoutePoint[]) {
@@ -388,7 +490,7 @@ function useTerrainScene({
       scene.background = new THREE.Color(0xf8fafc)
 
       const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000)
-      renderer = new THREE.WebGLRenderer({ antialias: true })
+      renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true })
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
       renderer.setSize(width, height)
       renderer.domElement.setAttribute('aria-label', '土浦用水の3D地形モデル')
@@ -630,18 +732,18 @@ function ElevationProfileChart({ profile }: { profile: ProfilePoint[] }) {
   const stats = profileStats(profile)
   if (!stats) {
     return (
-      <div className="flex h-48 items-center justify-center rounded border border-dashed bg-gray-50 text-sm text-gray-500">
+      <div className="flex h-72 items-center justify-center rounded border border-dashed bg-gray-50 text-sm text-gray-500">
         断面データなし
       </div>
     )
   }
 
-  const width = 720
-  const height = 220
-  const padLeft = 46
-  const padRight = 18
-  const padTop = 18
-  const padBottom = 34
+  const width = 1040
+  const height = 320
+  const padLeft = 58
+  const padRight = 28
+  const padTop = 24
+  const padBottom = 46
   const graphWidth = width - padLeft - padRight
   const graphHeight = height - padTop - padBottom
   const elevationRange = Math.max(stats.max - stats.min, 1)
@@ -656,7 +758,7 @@ function ElevationProfileChart({ profile }: { profile: ProfilePoint[] }) {
     .join(' ')
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="h-56 w-full overflow-visible">
+    <svg viewBox={`0 0 ${width} ${height}`} className="h-80 w-full overflow-visible">
       <rect x={padLeft} y={padTop} width={graphWidth} height={graphHeight} fill="#f8fafc" />
       {[0, 0.25, 0.5, 0.75, 1].map((tick) => (
         <g key={tick}>
@@ -720,8 +822,119 @@ function downloadProfileCsv(profile: ProfilePoint[], routePoints: RoutePoint[]) 
   URL.revokeObjectURL(url)
 }
 
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('Image failed to load'))
+    image.src = src
+  })
+}
+
+async function imageFromSvg(svg: SVGSVGElement, width: number, height: number) {
+  const clone = svg.cloneNode(true) as SVGSVGElement
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+  clone.setAttribute('width', String(width))
+  clone.setAttribute('height', String(height))
+  const blob = new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  try {
+    return await loadImage(url)
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+function drawContainedImage(
+  context: CanvasRenderingContext2D,
+  image: HTMLImageElement | HTMLCanvasElement,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+) {
+  const imageWidth = image instanceof HTMLCanvasElement ? image.width : image.naturalWidth || image.width
+  const imageHeight = image instanceof HTMLCanvasElement ? image.height : image.naturalHeight || image.height
+  const scale = Math.min(width / Math.max(imageWidth, 1), height / Math.max(imageHeight, 1))
+  const drawWidth = imageWidth * scale
+  const drawHeight = imageHeight * scale
+  context.drawImage(image, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight)
+}
+
+function drawExportPanel(
+  context: CanvasRenderingContext2D,
+  title: string,
+  image: HTMLImageElement | HTMLCanvasElement | null,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+) {
+  context.fillStyle = '#ffffff'
+  context.fillRect(x, y, width, height)
+  context.strokeStyle = '#d4d4d8'
+  context.lineWidth = 1
+  context.strokeRect(x, y, width, height)
+  context.fillStyle = '#18181b'
+  context.font = 'bold 18px sans-serif'
+  context.textBaseline = 'top'
+  context.fillText(title, x + 16, y + 14)
+
+  const contentX = x + 16
+  const contentY = y + 48
+  const contentWidth = width - 32
+  const contentHeight = height - 64
+  context.fillStyle = '#f8fafc'
+  context.fillRect(contentX, contentY, contentWidth, contentHeight)
+
+  if (image) {
+    drawContainedImage(context, image, contentX, contentY, contentWidth, contentHeight)
+  } else {
+    context.fillStyle = '#71717a'
+    context.font = '16px sans-serif'
+    context.textAlign = 'center'
+    context.textBaseline = 'middle'
+    context.fillText('断面データなし', contentX + contentWidth / 2, contentY + contentHeight / 2)
+    context.textAlign = 'left'
+  }
+}
+
+function drawExportStat(
+  context: CanvasRenderingContext2D,
+  label: string,
+  value: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+) {
+  context.fillStyle = '#f8fafc'
+  context.fillRect(x, y, width, height)
+  context.strokeStyle = '#e4e4e7'
+  context.strokeRect(x, y, width, height)
+  context.fillStyle = '#71717a'
+  context.font = '13px sans-serif'
+  context.textBaseline = 'top'
+  context.fillText(label, x + 12, y + 10)
+  context.fillStyle = '#18181b'
+  context.font = 'bold 18px sans-serif'
+  context.fillText(value, x + 12, y + 32)
+}
+
+function downloadCanvasPng(canvas: HTMLCanvasElement, filename: string) {
+  const url = canvas.toDataURL('image/png')
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+}
+
 export default function TerrainPageClient() {
   const sceneRef = useRef<HTMLDivElement | null>(null)
+  const profileChartRef = useRef<HTMLDivElement | null>(null)
+  const mapExporterRef = useRef<MapExporter | null>(null)
   const [points, setPoints] = useState<TerrainPoint[]>(FALLBACK_POINTS)
   const [routePoints, setRoutePoints] = useState<RoutePoint[]>(INITIAL_ROUTE_POINTS)
   const [usingFallback, setUsingFallback] = useState(true)
@@ -732,6 +945,28 @@ export default function TerrainPageClient() {
   const [profileLoading, setProfileLoading] = useState(false)
   const [verticalExaggeration, setVerticalExaggeration] = useState(12)
   const [pointSearch, setPointSearch] = useState('')
+  const [savedProfiles, setSavedProfiles] = useState<SavedRouteProfile[]>([])
+  const [savedProfilesLoaded, setSavedProfilesLoaded] = useState(false)
+  const [selectedProfileId, setSelectedProfileId] = useState('')
+  const [profileName, setProfileName] = useState('')
+  const [exportingPng, setExportingPng] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const loadedProfiles = loadSavedProfiles()
+    setSavedProfiles(loadedProfiles)
+    setProfileName(nextProfileName(loadedProfiles))
+    setSavedProfilesLoaded(true)
+  }, [])
+
+  useEffect(() => {
+    if (!savedProfilesLoaded) return
+    saveProfilesToStorage(savedProfiles)
+  }, [savedProfiles, savedProfilesLoaded])
+
+  const registerMapExporter = useCallback((exporter: MapExporter | null) => {
+    mapExporterRef.current = exporter
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -829,6 +1064,56 @@ export default function TerrainPageClient() {
     setRoutePoints((current) => current.filter((point) => point.routeKey !== routeKey))
   }, [])
 
+  const loadSavedRouteProfile = useCallback(
+    (profileId: string) => {
+      setSelectedProfileId(profileId)
+      const savedProfile = savedProfiles.find((item) => item.id === profileId)
+      if (!savedProfile) return
+      setProfileName(savedProfile.name)
+      setRoutePoints(savedProfile.points.map(routePointFromSaved))
+    },
+    [savedProfiles]
+  )
+
+  const startNewSavedProfile = useCallback(() => {
+    setSelectedProfileId('')
+    setProfileName(nextProfileName(savedProfiles))
+  }, [savedProfiles])
+
+  const saveCurrentRouteProfile = useCallback(() => {
+    if (routePoints.length < 2) return
+
+    const now = new Date().toISOString()
+    const name = profileName.trim() || nextProfileName(savedProfiles)
+    const pointsToSave = routePoints.map(serializeRoutePoint)
+    const existingId = selectedProfileId && savedProfiles.some((item) => item.id === selectedProfileId) ? selectedProfileId : ''
+    const nextId = existingId || createProfileId()
+
+    setSavedProfiles((current) => {
+      const existingIndex = current.findIndex((item) => item.id === nextId)
+      if (existingIndex >= 0) {
+        const next = [...current]
+        next[existingIndex] = { ...next[existingIndex], name, points: pointsToSave, updatedAt: now }
+        return next
+      }
+      return [...current, { id: nextId, name, points: pointsToSave, createdAt: now, updatedAt: now }]
+    })
+    setSelectedProfileId(nextId)
+    setProfileName(name)
+  }, [profileName, routePoints, savedProfiles, selectedProfileId])
+
+  const deleteSelectedRouteProfile = useCallback(() => {
+    if (!selectedProfileId) return
+    setSavedProfiles((current) => current.filter((item) => item.id !== selectedProfileId))
+    setSelectedProfileId('')
+    setProfileName('')
+  }, [selectedProfileId])
+
+  useEffect(() => {
+    if (profileName || selectedProfileId) return
+    setProfileName(nextProfileName(savedProfiles))
+  }, [profileName, savedProfiles, selectedProfileId])
+
   const refreshProfile = useCallback(() => {
     if (routePoints.length < 2) {
       setProfile([])
@@ -862,6 +1147,93 @@ export default function TerrainPageClient() {
     return points.filter((point) => point.label.toLowerCase().includes(query)).slice(0, 12)
   }, [pointSearch, points])
   const stats = profileStats(profile)
+  const selectedSavedProfile = useMemo(
+    () => savedProfiles.find((item) => item.id === selectedProfileId) ?? null,
+    [savedProfiles, selectedProfileId]
+  )
+
+  const downloadCombinedPng = useCallback(async () => {
+    const sceneCanvas = sceneRef.current?.querySelector('canvas') as HTMLCanvasElement | null | undefined
+    const mapExporter = mapExporterRef.current
+    if (!sceneCanvas || !mapExporter) {
+      setExportError('PNG出力に必要な表示がまだ準備できていません')
+      return
+    }
+
+    setExportingPng(true)
+    setExportError(null)
+
+    try {
+      const [sceneImage, exportedMap] = await Promise.all([
+        loadImage(sceneCanvas.toDataURL('image/png')),
+        mapExporter(),
+      ])
+      const mapImage = await loadImage(exportedMap.dataUrl)
+      const profileSvg = profileChartRef.current?.querySelector('svg') as SVGSVGElement | null | undefined
+      const profileRect = profileChartRef.current?.getBoundingClientRect()
+      const profileImage = profileSvg
+        ? await imageFromSvg(
+            profileSvg,
+            Math.max(1040, Math.round(profileRect?.width || 1040)),
+            Math.max(320, Math.round(profileRect?.height || 320))
+          )
+        : null
+
+      const width = 1440
+      const margin = 32
+      const gap = 24
+      const headerHeight = 76
+      const topPanelHeight = 500
+      const statsHeight = 76
+      const chartHeight = 410
+      const topPanelWidth = (width - margin * 2 - gap) / 2
+      const height = margin + headerHeight + topPanelHeight + gap + statsHeight + 16 + chartHeight + margin
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const context = canvas.getContext('2d')
+      if (!context) throw new Error('Canvas is not available')
+
+      context.fillStyle = '#f4f4f5'
+      context.fillRect(0, 0, width, height)
+      context.fillStyle = '#18181b'
+      context.font = 'bold 30px sans-serif'
+      context.textBaseline = 'top'
+      context.fillText('土浦用水 3D地形・標高断面', margin, margin)
+      context.font = '16px sans-serif'
+      context.fillStyle = '#52525b'
+      const subtitle = profileName.trim() || selectedSavedProfile?.name || '未保存プロファイル'
+      context.fillText(`${subtitle} / 測線 ${routePoints.length}点 / ${new Date().toLocaleString('ja-JP')}`, margin, margin + 42)
+
+      const topY = margin + headerHeight
+      drawExportPanel(context, '3D地形', sceneImage, margin, topY, topPanelWidth, topPanelHeight)
+      drawExportPanel(context, 'OSM地図', mapImage, margin + topPanelWidth + gap, topY, topPanelWidth, topPanelHeight)
+
+      const statsY = topY + topPanelHeight + gap
+      const statGap = 12
+      const statWidth = (width - margin * 2 - statGap * 5) / 6
+      const elevationDelta =
+        stats && stats.start !== null && stats.end !== null ? formatElevation(stats.end - stats.start) : '-'
+      const exportStats = [
+        ['距離', stats ? formatDistance(stats.distance) : '-'],
+        ['標高差', elevationDelta],
+        ['累積上昇', stats ? formatElevation(stats.ascent) : '-'],
+        ['累積下降', stats ? formatElevation(stats.descent) : '-'],
+        ['最低', stats ? formatElevation(stats.min) : '-'],
+        ['最高', stats ? formatElevation(stats.max) : '-'],
+      ]
+      exportStats.forEach(([label, value], index) => {
+        drawExportStat(context, label, value, margin + index * (statWidth + statGap), statsY, statWidth, statsHeight)
+      })
+
+      drawExportPanel(context, '標高断面', profileImage, margin, statsY + statsHeight + 16, width - margin * 2, chartHeight)
+      downloadCanvasPng(canvas, `tsuchiura-yosui-terrain-${new Date().toISOString().slice(0, 10)}.png`)
+    } catch {
+      setExportError('PNG出力に失敗しました。地図タイルの読み込み後に再試行してください')
+    } finally {
+      setExportingPng(false)
+    }
+  }, [profileName, routePoints.length, selectedSavedProfile?.name, stats])
 
   return (
     <div className="min-h-[calc(100vh-96px)] bg-zinc-50 text-zinc-900">
@@ -874,59 +1246,209 @@ export default function TerrainPageClient() {
             </Link>
             <h1 className="mt-2 text-2xl font-bold sm:text-3xl">土浦用水 3D地形・標高断面</h1>
           </div>
-          <Link
-            href="/maps/tsuchiura-yosui"
-            className="inline-flex items-center justify-center gap-2 rounded border bg-white px-3 py-2 text-sm font-semibold shadow-sm transition hover:border-blue-400 hover:text-blue-700"
-          >
-            <IoMapOutline />
-            通常マップ
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="inline-flex items-center justify-center gap-2 rounded border bg-white px-3 py-2 text-sm font-semibold shadow-sm transition hover:border-teal-500 hover:text-teal-700 disabled:cursor-not-allowed disabled:text-gray-300"
+              onClick={downloadCombinedPng}
+              disabled={!terrainGrid || terrainLoading || exportingPng}
+            >
+              <IoImageOutline />
+              {exportingPng ? 'PNG作成中' : 'PNG出力'}
+            </button>
+            <Link
+              href="/maps/tsuchiura-yosui"
+              className="inline-flex items-center justify-center gap-2 rounded border bg-white px-3 py-2 text-sm font-semibold shadow-sm transition hover:border-blue-400 hover:text-blue-700"
+            >
+              <IoMapOutline />
+              通常マップ
+            </Link>
+          </div>
         </div>
       </section>
 
-      <main className="mx-auto grid max-w-7xl gap-4 px-4 py-4 lg:grid-cols-[minmax(0,1fr)_430px]">
+      <main className="mx-auto grid max-w-7xl gap-4 px-4 py-4 xl:grid-cols-[minmax(0,1fr)_390px]">
         <div className="space-y-4">
-          <section className="overflow-hidden rounded border bg-white shadow-sm">
-            <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
-              <div className="flex min-w-0 items-center gap-2">
-                <IoCubeOutline className="shrink-0 text-lg text-teal-700" />
-                <h2 className="truncate text-base font-semibold">3D地形</h2>
-              </div>
-              <div className="text-xs text-gray-500">
-                {terrainGrid ? `${terrainGrid.minElevation.toFixed(0)}-${terrainGrid.maxElevation.toFixed(0)}m` : 'DEM'}
-              </div>
-            </div>
-            <div ref={sceneRef} className="h-[420px] min-h-[420px] bg-slate-50 sm:h-[560px] lg:h-[calc(100vh-310px)]" />
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t px-4 py-3 text-sm text-gray-600">
-              <span>{usingFallback ? 'サンプル点' : `保存ピン ${points.length}点`}</span>
-              <span>表示範囲内 {insidePointCount}点</span>
-              <span>測線 {routePoints.length}点</span>
-              {terrainLoading && <span>DEM読み込み中</span>}
-              {terrainError && <span className="text-red-600">DEM取得に失敗しました</span>}
-            </div>
-          </section>
+          {exportError && (
+            <div className="rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{exportError}</div>
+          )}
 
-          <section className="overflow-hidden rounded border bg-white shadow-sm">
-            <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
-              <div className="flex min-w-0 items-center gap-2">
-                <IoMapOutline className="shrink-0 text-lg text-teal-700" />
-                <h2 className="truncate text-base font-semibold">地図選択</h2>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <section className="overflow-hidden rounded border bg-white shadow-sm">
+              <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <IoCubeOutline className="shrink-0 text-lg text-teal-700" />
+                  <h2 className="truncate text-base font-semibold">3D地形</h2>
+                </div>
+                <div className="text-xs text-gray-500">
+                  {terrainGrid ? `${terrainGrid.minElevation.toFixed(0)}-${terrainGrid.maxElevation.toFixed(0)}m` : 'DEM'}
+                </div>
               </div>
-              <div className="text-xs text-gray-500">クリック追加</div>
+              <div ref={sceneRef} className="h-[420px] min-h-[420px] bg-slate-50 sm:h-[500px] xl:h-[520px]" />
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t px-4 py-3 text-sm text-gray-600">
+                <span>{usingFallback ? 'サンプル点' : `保存ピン ${points.length}点`}</span>
+                <span>表示範囲内 {insidePointCount}点</span>
+                <span>測線 {routePoints.length}点</span>
+                {terrainLoading && <span>DEM読み込み中</span>}
+                {terrainError && <span className="text-red-600">DEM取得に失敗しました</span>}
+              </div>
+            </section>
+
+            <section className="overflow-hidden rounded border bg-white shadow-sm">
+              <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <IoMapOutline className="shrink-0 text-lg text-teal-700" />
+                  <h2 className="truncate text-base font-semibold">地図選択</h2>
+                </div>
+                <div className="text-xs text-gray-500">クリック追加</div>
+              </div>
+              <div className="h-[420px] min-h-[420px] sm:h-[500px] xl:h-[520px]">
+                <TerrainSelectionMap
+                  points={points}
+                  routePoints={routePoints}
+                  bounds={TSUCHIURA_BOUNDS}
+                  onSelectPoint={addRoutePoint}
+                  onAddFreePoint={addFreeRoutePoint}
+                  onExporterReady={registerMapExporter}
+                />
+              </div>
+            </section>
+          </div>
+
+          <section className="rounded border bg-white p-4 shadow-sm">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <IoStatsChartOutline className="text-lg text-teal-700" />
+                <h2 className="text-base font-semibold">断面</h2>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="inline-flex h-9 w-9 items-center justify-center rounded border bg-white text-gray-700 transition hover:border-teal-500 hover:text-teal-700 disabled:cursor-not-allowed disabled:text-gray-300"
+                  title="断面更新"
+                  aria-label="断面更新"
+                  onClick={refreshProfile}
+                  disabled={routePoints.length < 2 || profileLoading}
+                >
+                  <IoRefreshOutline />
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-9 w-9 items-center justify-center rounded border bg-white text-gray-700 transition hover:border-teal-500 hover:text-teal-700 disabled:cursor-not-allowed disabled:text-gray-300"
+                  title="CSV出力"
+                  aria-label="CSV出力"
+                  onClick={() => downloadProfileCsv(profile, routePoints)}
+                  disabled={!profile.length}
+                >
+                  <IoDownloadOutline />
+                </button>
+              </div>
             </div>
-            <div className="h-[380px]">
-              <TerrainSelectionMap
-                points={points}
-                routePoints={routePoints}
-                bounds={TSUCHIURA_BOUNDS}
-                onSelectPoint={addRoutePoint}
-                onAddFreePoint={addFreeRoutePoint}
-              />
+
+            <div className="mb-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-3 lg:grid-cols-6">
+              <div className="rounded bg-gray-50 p-3">
+                <div className="text-xs text-gray-500">距離</div>
+                <div className="mt-1 font-semibold">{stats ? formatDistance(stats.distance) : '-'}</div>
+              </div>
+              <div className="rounded bg-gray-50 p-3">
+                <div className="text-xs text-gray-500">標高差</div>
+                <div className="mt-1 font-semibold">
+                  {stats && stats.start !== null && stats.end !== null ? formatElevation(stats.end - stats.start) : '-'}
+                </div>
+              </div>
+              <div className="rounded bg-gray-50 p-3">
+                <div className="text-xs text-gray-500">累積上昇</div>
+                <div className="mt-1 font-semibold">{stats ? formatElevation(stats.ascent) : '-'}</div>
+              </div>
+              <div className="rounded bg-gray-50 p-3">
+                <div className="text-xs text-gray-500">累積下降</div>
+                <div className="mt-1 font-semibold">{stats ? formatElevation(stats.descent) : '-'}</div>
+              </div>
+              <div className="rounded bg-gray-50 p-3">
+                <div className="text-xs text-gray-500">最低</div>
+                <div className="mt-1 font-semibold">{stats ? formatElevation(stats.min) : '-'}</div>
+              </div>
+              <div className="rounded bg-gray-50 p-3">
+                <div className="text-xs text-gray-500">最高</div>
+                <div className="mt-1 font-semibold">{stats ? formatElevation(stats.max) : '-'}</div>
+              </div>
+            </div>
+            <div ref={profileChartRef}>
+              {profileLoading ? (
+                <div className="flex h-80 items-center justify-center rounded border border-dashed bg-gray-50 text-sm text-gray-500">
+                  計算中
+                </div>
+              ) : (
+                <ElevationProfileChart profile={profile} />
+              )}
             </div>
           </section>
         </div>
 
         <aside className="space-y-4">
+          <section className="rounded border bg-white p-4 shadow-sm">
+            <div className="mb-3 flex items-center gap-2">
+              <IoBookmarkOutline className="text-lg text-teal-700" />
+              <h2 className="text-base font-semibold">プロファイル</h2>
+            </div>
+            <div className="space-y-3">
+              <select
+                className="w-full rounded border bg-white px-3 py-2 text-sm"
+                value={selectedProfileId}
+                onChange={(event) => {
+                  const profileId = event.target.value
+                  if (profileId) loadSavedRouteProfile(profileId)
+                  else startNewSavedProfile()
+                }}
+              >
+                <option value="">新規プロファイル</option>
+                {savedProfiles.map((savedProfile) => (
+                  <option key={savedProfile.id} value={savedProfile.id}>
+                    {savedProfile.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="text"
+                className="w-full rounded border px-3 py-2 text-sm"
+                placeholder="プロファイル名"
+                value={profileName}
+                onChange={(event) => setProfileName(event.target.value)}
+              />
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  className="inline-flex items-center justify-center gap-1 rounded border bg-teal-700 px-2 py-2 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400"
+                  onClick={saveCurrentRouteProfile}
+                  disabled={routePoints.length < 2}
+                >
+                  <IoSaveOutline />
+                  保存
+                </button>
+                <button
+                  type="button"
+                  className="rounded border bg-white px-2 py-2 text-sm font-semibold text-gray-700 transition hover:border-teal-500 hover:text-teal-700"
+                  onClick={startNewSavedProfile}
+                >
+                  新規
+                </button>
+                <button
+                  type="button"
+                  className="rounded border bg-white px-2 py-2 text-sm font-semibold text-gray-700 transition hover:border-red-500 hover:text-red-600 disabled:cursor-not-allowed disabled:text-gray-300"
+                  onClick={deleteSelectedRouteProfile}
+                  disabled={!selectedProfileId}
+                >
+                  削除
+                </button>
+              </div>
+              {selectedSavedProfile && (
+                <div className="text-xs text-gray-500">
+                  {selectedSavedProfile.points.length}点 / 更新 {new Date(selectedSavedProfile.updatedAt).toLocaleString('ja-JP')}
+                </div>
+              )}
+            </div>
+          </section>
+
           <section className="rounded border bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
@@ -1049,73 +1571,6 @@ export default function TerrainPageClient() {
               />
               <span className="w-12 text-right text-sm tabular-nums text-gray-700">{verticalExaggeration}x</span>
             </div>
-          </section>
-
-          <section className="rounded border bg-white p-4 shadow-sm">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <IoStatsChartOutline className="text-lg text-teal-700" />
-                <h2 className="text-base font-semibold">断面</h2>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  className="inline-flex h-9 w-9 items-center justify-center rounded border bg-white text-gray-700 transition hover:border-teal-500 hover:text-teal-700 disabled:cursor-not-allowed disabled:text-gray-300"
-                  title="断面更新"
-                  aria-label="断面更新"
-                  onClick={refreshProfile}
-                  disabled={routePoints.length < 2 || profileLoading}
-                >
-                  <IoRefreshOutline />
-                </button>
-                <button
-                  type="button"
-                  className="inline-flex h-9 w-9 items-center justify-center rounded border bg-white text-gray-700 transition hover:border-teal-500 hover:text-teal-700 disabled:cursor-not-allowed disabled:text-gray-300"
-                  title="CSV出力"
-                  aria-label="CSV出力"
-                  onClick={() => downloadProfileCsv(profile, routePoints)}
-                  disabled={!profile.length}
-                >
-                  <IoDownloadOutline />
-                </button>
-              </div>
-            </div>
-
-            <div className="mb-3 grid grid-cols-2 gap-2 text-sm">
-              <div className="rounded bg-gray-50 p-3">
-                <div className="text-xs text-gray-500">距離</div>
-                <div className="mt-1 font-semibold">{stats ? formatDistance(stats.distance) : '-'}</div>
-              </div>
-              <div className="rounded bg-gray-50 p-3">
-                <div className="text-xs text-gray-500">標高差</div>
-                <div className="mt-1 font-semibold">
-                  {stats && stats.start !== null && stats.end !== null ? formatElevation(stats.end - stats.start) : '-'}
-                </div>
-              </div>
-              <div className="rounded bg-gray-50 p-3">
-                <div className="text-xs text-gray-500">累積上昇</div>
-                <div className="mt-1 font-semibold">{stats ? formatElevation(stats.ascent) : '-'}</div>
-              </div>
-              <div className="rounded bg-gray-50 p-3">
-                <div className="text-xs text-gray-500">累積下降</div>
-                <div className="mt-1 font-semibold">{stats ? formatElevation(stats.descent) : '-'}</div>
-              </div>
-              <div className="rounded bg-gray-50 p-3">
-                <div className="text-xs text-gray-500">最低</div>
-                <div className="mt-1 font-semibold">{stats ? formatElevation(stats.min) : '-'}</div>
-              </div>
-              <div className="rounded bg-gray-50 p-3">
-                <div className="text-xs text-gray-500">最高</div>
-                <div className="mt-1 font-semibold">{stats ? formatElevation(stats.max) : '-'}</div>
-              </div>
-            </div>
-            {profileLoading ? (
-              <div className="flex h-56 items-center justify-center rounded border border-dashed bg-gray-50 text-sm text-gray-500">
-                計算中
-              </div>
-            ) : (
-              <ElevationProfileChart profile={profile} />
-            )}
           </section>
         </aside>
       </main>

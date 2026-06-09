@@ -2,7 +2,7 @@
 
 import 'leaflet/dist/leaflet.css'
 import L from 'leaflet'
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 
 type Bounds = {
   north: number
@@ -23,12 +23,26 @@ type RoutePoint = SelectionPoint & {
   source: 'note' | 'custom'
 }
 
+type ExportedMapImage = {
+  dataUrl: string
+  width: number
+  height: number
+}
+
+type MapExporter = () => Promise<ExportedMapImage>
+
 type TerrainSelectionMapProps = {
   points: SelectionPoint[]
   routePoints: RoutePoint[]
   bounds: Bounds
   onSelectPoint: (point: SelectionPoint) => void
   onAddFreePoint: (lat: number, lng: number) => void
+  onExporterReady?: (exporter: MapExporter | null) => void
+}
+
+type LatestMapData = {
+  points: SelectionPoint[]
+  routePoints: RoutePoint[]
 }
 
 function boundsToLatLng(bounds: Bounds): L.LatLngBoundsExpression {
@@ -61,22 +75,152 @@ function popupContent(title: string, subText?: string) {
   return wrapper
 }
 
+function loadTileImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image()
+    image.crossOrigin = 'anonymous'
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error(`Map tile failed: ${src}`))
+    image.src = src
+  })
+}
+
+function drawCircleMarker(
+  context: CanvasRenderingContext2D,
+  point: L.Point,
+  radius: number,
+  fill: string,
+  stroke: string,
+  lineWidth: number
+) {
+  context.beginPath()
+  context.arc(point.x, point.y, radius, 0, Math.PI * 2)
+  context.fillStyle = fill
+  context.fill()
+  context.lineWidth = lineWidth
+  context.strokeStyle = stroke
+  context.stroke()
+}
+
 export default function TerrainSelectionMap({
   points,
   routePoints,
   bounds,
   onSelectPoint,
   onAddFreePoint,
+  onExporterReady,
 }: TerrainSelectionMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const baseLayerRef = useRef<L.LayerGroup | null>(null)
   const routeLayerRef = useRef<L.LayerGroup | null>(null)
   const callbacksRef = useRef({ onSelectPoint, onAddFreePoint })
+  const latestDataRef = useRef<LatestMapData>({ points, routePoints })
 
   useEffect(() => {
     callbacksRef.current = { onSelectPoint, onAddFreePoint }
   }, [onSelectPoint, onAddFreePoint])
+
+  useEffect(() => {
+    latestDataRef.current = { points, routePoints }
+  }, [points, routePoints])
+
+  const exportCurrentMap = useCallback(async () => {
+    const map = mapRef.current
+    if (!map) throw new Error('Map is not ready')
+
+    const size = map.getSize()
+    const width = Math.max(1, Math.round(size.x))
+    const height = Math.max(1, Math.round(size.y))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('Canvas is not available')
+
+    context.fillStyle = '#f8fafc'
+    context.fillRect(0, 0, width, height)
+
+    const zoom = map.getZoom()
+    const tileSize = 256
+    const tileCount = 2 ** zoom
+    const pixelBounds = map.getPixelBounds()
+    const pixelMin = pixelBounds.getTopLeft()
+    const pixelMax = pixelBounds.getBottomRight()
+    const minTile = pixelMin.divideBy(tileSize).floor()
+    const maxTile = pixelMax.divideBy(tileSize).floor()
+    const tileJobs: Promise<void>[] = []
+
+    for (let tileX = minTile.x; tileX <= maxTile.x; tileX += 1) {
+      for (let tileY = minTile.y; tileY <= maxTile.y; tileY += 1) {
+        if (tileY < 0 || tileY >= tileCount) continue
+        const wrappedX = ((tileX % tileCount) + tileCount) % tileCount
+        const subdomain = ['a', 'b', 'c'][Math.abs(tileX + tileY) % 3]
+        const url = `https://${subdomain}.tile.openstreetmap.org/${zoom}/${wrappedX}/${tileY}.png`
+        const drawX = tileX * tileSize - pixelMin.x
+        const drawY = tileY * tileSize - pixelMin.y
+
+        tileJobs.push(
+          loadTileImage(url)
+            .then((image) => {
+              context.drawImage(image, drawX, drawY, tileSize, tileSize)
+            })
+            .catch(() => {
+              context.fillStyle = '#e5e7eb'
+              context.fillRect(drawX, drawY, tileSize, tileSize)
+            })
+        )
+      }
+    }
+
+    await Promise.all(tileJobs)
+
+    const { points: latestPoints, routePoints: latestRoutePoints } = latestDataRef.current
+    const mapBounds = map.getBounds()
+    latestPoints.forEach((point) => {
+      if (!mapBounds.contains([point.lat, point.lng])) return
+      const markerPoint = map.latLngToContainerPoint([point.lat, point.lng])
+      drawCircleMarker(context, markerPoint, 4, '#ef4444', '#64748b', 1)
+    })
+
+    const routePositions = latestRoutePoints.map((point) => map.latLngToContainerPoint([point.lat, point.lng]))
+    if (routePositions.length >= 2) {
+      context.beginPath()
+      routePositions.forEach((position, index) => {
+        if (index === 0) context.moveTo(position.x, position.y)
+        else context.lineTo(position.x, position.y)
+      })
+      context.strokeStyle = '#111827'
+      context.lineWidth = 4
+      context.lineJoin = 'round'
+      context.lineCap = 'round'
+      context.stroke()
+    }
+
+    routePositions.forEach((position, index) => {
+      drawCircleMarker(context, position, 9, routeColor(index, routePositions.length), '#111827', 2)
+      context.fillStyle = '#ffffff'
+      context.font = 'bold 11px sans-serif'
+      context.textAlign = 'center'
+      context.textBaseline = 'middle'
+      context.fillText(String(index + 1), position.x, position.y + 0.5)
+    })
+
+    context.fillStyle = 'rgba(255, 255, 255, 0.86)'
+    context.fillRect(8, height - 24, 236, 16)
+    context.fillStyle = '#475569'
+    context.font = '10px sans-serif'
+    context.textAlign = 'left'
+    context.textBaseline = 'middle'
+    context.fillText('© OpenStreetMap contributors', 12, height - 16)
+
+    return { dataUrl: canvas.toDataURL('image/png'), width, height }
+  }, [])
+
+  useEffect(() => {
+    onExporterReady?.(exportCurrentMap)
+    return () => onExporterReady?.(null)
+  }, [exportCurrentMap, onExporterReady])
 
   useEffect(() => {
     const container = containerRef.current
@@ -99,6 +243,7 @@ export default function TerrainSelectionMap({
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      crossOrigin: true,
     }).addTo(map)
 
     const baseLayer = L.layerGroup().addTo(map)
@@ -148,9 +293,8 @@ export default function TerrainSelectionMap({
   }, [points])
 
   useEffect(() => {
-    const map = mapRef.current
     const routeLayer = routeLayerRef.current
-    if (!map || !routeLayer) return
+    if (!routeLayer) return
 
     routeLayer.clearLayers()
     const routePositions = routePoints.map((point) => [point.lat, point.lng] as [number, number])
@@ -180,10 +324,6 @@ export default function TerrainSelectionMap({
         .bindPopup(popupContent(point.label, `${index + 1}`), { minWidth: 180 })
         .addTo(routeLayer)
     })
-
-    if (routePositions.length >= 2) {
-      map.fitBounds(routePositions, { padding: [28, 28], maxZoom: 15 })
-    }
   }, [routePoints])
 
   return <div ref={containerRef} className="h-full min-h-[340px] w-full" />
