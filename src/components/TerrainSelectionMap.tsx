@@ -66,9 +66,11 @@ type TerrainSelectionMapProps = {
   bounds: Bounds
   onSelectPoint: (point: SelectionPoint) => void
   onAddFreePoint: (lat: number, lng: number) => void
+  onSelectRoutePoint?: (routeKey: string) => void
   onExporterReady?: (exporter: MapExporter | null) => void
   mapFeatures: MapOverlayFeatures
   visibleLayers: MapLayerVisibility
+  selectedRouteKey: string | null
 }
 
 type LatestMapData = {
@@ -76,6 +78,7 @@ type LatestMapData = {
   routePoints: RoutePoint[]
   mapFeatures: MapOverlayFeatures
   visibleLayers: MapLayerVisibility
+  selectedRouteKey: string | null
 }
 
 function boundsToLatLng(bounds: Bounds): L.LatLngBoundsExpression {
@@ -181,25 +184,27 @@ export default function TerrainSelectionMap({
   bounds,
   onSelectPoint,
   onAddFreePoint,
+  onSelectRoutePoint,
   onExporterReady,
   mapFeatures,
   visibleLayers,
+  selectedRouteKey,
 }: TerrainSelectionMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const baseLayerRef = useRef<L.LayerGroup | null>(null)
   const featureLayerRef = useRef<L.LayerGroup | null>(null)
   const routeLayerRef = useRef<L.LayerGroup | null>(null)
-  const callbacksRef = useRef({ onSelectPoint, onAddFreePoint })
-  const latestDataRef = useRef<LatestMapData>({ points, routePoints, mapFeatures, visibleLayers })
+  const callbacksRef = useRef({ onSelectPoint, onAddFreePoint, onSelectRoutePoint })
+  const latestDataRef = useRef<LatestMapData>({ points, routePoints, mapFeatures, visibleLayers, selectedRouteKey })
 
   useEffect(() => {
-    callbacksRef.current = { onSelectPoint, onAddFreePoint }
-  }, [onSelectPoint, onAddFreePoint])
+    callbacksRef.current = { onSelectPoint, onAddFreePoint, onSelectRoutePoint }
+  }, [onSelectPoint, onAddFreePoint, onSelectRoutePoint])
 
   useEffect(() => {
-    latestDataRef.current = { points, routePoints, mapFeatures, visibleLayers }
-  }, [points, routePoints, mapFeatures, visibleLayers])
+    latestDataRef.current = { points, routePoints, mapFeatures, visibleLayers, selectedRouteKey }
+  }, [points, routePoints, mapFeatures, visibleLayers, selectedRouteKey])
 
   const exportCurrentMap = useCallback(async () => {
     const map = mapRef.current
@@ -256,6 +261,7 @@ export default function TerrainSelectionMap({
       routePoints: latestRoutePoints,
       mapFeatures: latestMapFeatures,
       visibleLayers: latestVisibleLayers,
+      selectedRouteKey: latestSelectedRouteKey,
     } = latestDataRef.current
     const mapBounds = map.getBounds()
 
@@ -317,9 +323,17 @@ export default function TerrainSelectionMap({
     }
 
     routePositions.forEach((position, index) => {
-      drawCircleMarker(context, position, 9, routeColor(index, routePositions.length), '#111827', 2)
+      const selected = latestRoutePoints[index]?.routeKey === latestSelectedRouteKey
+      drawCircleMarker(
+        context,
+        position,
+        selected ? 14 : 9,
+        selected ? '#db2777' : routeColor(index, routePositions.length),
+        '#111827',
+        selected ? 3 : 2
+      )
       context.fillStyle = '#ffffff'
-      context.font = 'bold 11px sans-serif'
+      context.font = selected ? 'bold 13px sans-serif' : 'bold 11px sans-serif'
       context.textAlign = 'center'
       context.textBaseline = 'middle'
       context.fillText(String(index + 1), position.x, position.y + 0.5)
@@ -454,23 +468,37 @@ export default function TerrainSelectionMap({
     }
 
     routePoints.forEach((point, index) => {
+      const selected = point.routeKey === selectedRouteKey
       L.circleMarker([point.lat, point.lng], {
-        radius: 8,
+        radius: selected ? 13 : 8,
         color: '#111827',
-        fillColor: routeColor(index, routePoints.length),
+        fillColor: selected ? '#db2777' : routeColor(index, routePoints.length),
         fillOpacity: 0.95,
-        weight: 2,
+        weight: selected ? 3 : 2,
       })
         .on('click', (event) => {
           if (event.originalEvent) {
             L.DomEvent.stopPropagation(event.originalEvent)
             event.originalEvent.preventDefault()
           }
+          callbacksRef.current.onSelectRoutePoint?.(point.routeKey)
         })
         .bindPopup(popupContent(point.label, `${index + 1}`), { minWidth: 180 })
         .addTo(routeLayer)
     })
-  }, [routePoints])
+  }, [routePoints, selectedRouteKey])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !selectedRouteKey) return
+    const selectedPoint = routePoints.find((point) => point.routeKey === selectedRouteKey)
+    if (!selectedPoint) return
+    const currentZoom = map.getZoom()
+    map.flyTo([selectedPoint.lat, selectedPoint.lng], Math.max(currentZoom, 15), {
+      animate: true,
+      duration: 0.45,
+    })
+  }, [routePoints, selectedRouteKey])
 
   return <div ref={containerRef} className="h-full min-h-[340px] w-full" />
 }

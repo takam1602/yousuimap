@@ -602,6 +602,7 @@ function useTerrainScene({
   grid,
   points,
   routePoints,
+  selectedRouteKey,
   verticalExaggeration,
   mapFeatures,
   visibleLayers,
@@ -610,10 +611,19 @@ function useTerrainScene({
   grid: TerrainGrid | null
   points: TerrainPoint[]
   routePoints: RoutePoint[]
+  selectedRouteKey: string | null
   verticalExaggeration: number
   mapFeatures: MapOverlayFeatures
   visibleLayers: MapLayerVisibility
 }) {
+  const cameraStateRef = useRef<{
+    yaw: number
+    pitch: number
+    distance: number
+    target: { x: number; y: number; z: number } | null
+  }>({ yaw: -0.75, pitch: 0.58, distance: 26, target: null })
+  const lastFocusedRouteKeyRef = useRef<string | null>(null)
+
   useEffect(() => {
     const container = containerRef.current
     if (!container || !grid) return
@@ -658,6 +668,8 @@ function useTerrainScene({
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
       renderer.setSize(width, height)
       renderer.domElement.setAttribute('aria-label', '土浦用水の3D地形モデル')
+      renderer.domElement.style.cursor = 'grab'
+      renderer.domElement.style.touchAction = 'none'
       container.replaceChildren(renderer.domElement)
 
       const positions: number[] = []
@@ -781,10 +793,12 @@ function useTerrainScene({
       const markerGroup = new THREE.Group()
       const markerGeometry = new THREE.SphereGeometry(0.052, 10, 8)
       const routeGeometry = new THREE.SphereGeometry(0.12, 14, 10)
+      const selectedRouteGeometry = new THREE.SphereGeometry(0.22, 18, 14)
       const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xdc2626 })
       const startMaterial = new THREE.MeshBasicMaterial({ color: 0x0284c7 })
       const midMaterial = new THREE.MeshBasicMaterial({ color: 0xf59e0b })
       const endMaterial = new THREE.MeshBasicMaterial({ color: 0x16a34a })
+      const selectedMaterial = new THREE.MeshBasicMaterial({ color: 0xdb2777 })
       const renderedPoints = points
         .filter((point) => isInsideBounds(point, grid.bounds))
         .slice(0, MAX_RENDERED_MARKERS)
@@ -797,17 +811,19 @@ function useTerrainScene({
         markerGroup.add(marker)
       })
 
-      const routePositions = routePoints
+      const routeMarkers = routePoints
         .filter((point) => isInsideBounds(point, grid.bounds))
-        .map((point) => toScenePoint(point))
+        .map((point) => ({ point, position: toScenePoint(point) }))
+      const routePositions = routeMarkers.map((marker) => marker.position)
 
-      routePositions.forEach((position, index) => {
+      routeMarkers.forEach(({ point, position }, index) => {
+        const selected = point.routeKey === selectedRouteKey
         const marker = new THREE.Mesh(
-          routeGeometry,
-          index === 0 ? startMaterial : index === routePositions.length - 1 ? endMaterial : midMaterial
+          selected ? selectedRouteGeometry : routeGeometry,
+          selected ? selectedMaterial : index === 0 ? startMaterial : index === routePositions.length - 1 ? endMaterial : midMaterial
         )
         marker.position.copy(position)
-        marker.position.y += 0.26
+        marker.position.y += selected ? 0.38 : 0.26
         markerGroup.add(marker)
       })
       scene.add(markerGroup)
@@ -821,28 +837,67 @@ function useTerrainScene({
         scene.add(line)
       }
 
-      const target = new THREE.Vector3(0, heightRange * 0.22, 0)
-      let yaw = -0.75
-      let pitch = 0.58
-      let distance = 26
+      const selectedRoutePoint =
+        selectedRouteKey && selectedRouteKey !== lastFocusedRouteKeyRef.current
+          ? routePoints.find((point) => point.routeKey === selectedRouteKey && isInsideBounds(point, grid.bounds))
+          : null
+      const selectedTarget = selectedRoutePoint ? toScenePoint(selectedRoutePoint) : null
+      if (selectedRouteKey !== lastFocusedRouteKeyRef.current) {
+        lastFocusedRouteKeyRef.current = selectedRouteKey
+      }
+
+      const savedCamera = cameraStateRef.current
+      const target = savedCamera.target
+        ? new THREE.Vector3(savedCamera.target.x, savedCamera.target.y, savedCamera.target.z)
+        : new THREE.Vector3(0, heightRange * 0.22, 0)
+      if (selectedTarget) {
+        target.set(selectedTarget.x, selectedTarget.y + 0.2, selectedTarget.z)
+      }
+      let yaw = savedCamera.yaw
+      let pitch = savedCamera.pitch
+      let distance = savedCamera.distance
       let dragging = false
+      let dragMode: 'rotate' | 'pan' = 'rotate'
       let lastX = 0
       let lastY = 0
 
       const updateCamera = () => {
         const horizontal = distance * Math.cos(pitch)
-        camera.position.set(
+        camera.position.copy(target).add(new THREE.Vector3(
           Math.sin(yaw) * horizontal,
-          distance * Math.sin(pitch) + heightRange * 0.25,
+          distance * Math.sin(pitch) + heightRange * 0.25 - target.y,
           Math.cos(yaw) * horizontal
-        )
+        ))
         camera.lookAt(target)
+        cameraStateRef.current = {
+          yaw,
+          pitch,
+          distance,
+          target: { x: target.x, y: target.y, z: target.z },
+        }
+      }
+
+      const panCamera = (dx: number, dy: number) => {
+        const forward = new THREE.Vector3()
+        camera.getWorldDirection(forward)
+        forward.y = 0
+        if (forward.lengthSq() < 1e-8) forward.set(0, 0, -1)
+        forward.normalize()
+        const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize()
+        const panScale = distance * 0.0018
+        target.addScaledVector(right, -dx * panScale)
+        target.addScaledVector(forward, dy * panScale)
+        target.x = clamp(target.x, -12, 12)
+        target.z = clamp(target.z, -12, 12)
+        updateCamera()
       }
 
       const onPointerDown = (event: PointerEvent) => {
         dragging = true
+        dragMode = event.shiftKey || event.button === 1 || event.button === 2 ? 'pan' : 'rotate'
         lastX = event.clientX
         lastY = event.clientY
+        renderer.domElement.style.cursor = 'grabbing'
         renderer.domElement.setPointerCapture(event.pointerId)
       }
 
@@ -852,13 +907,18 @@ function useTerrainScene({
         const dy = event.clientY - lastY
         lastX = event.clientX
         lastY = event.clientY
-        yaw -= dx * 0.006
-        pitch = clamp(pitch + dy * 0.006, 0.18, 1.18)
-        updateCamera()
+        if (dragMode === 'pan') {
+          panCamera(dx, dy)
+        } else {
+          yaw -= dx * 0.006
+          pitch = clamp(pitch + dy * 0.006, 0.18, 1.18)
+          updateCamera()
+        }
       }
 
       const onPointerUp = (event: PointerEvent) => {
         dragging = false
+        renderer.domElement.style.cursor = 'grab'
         if (renderer.domElement.hasPointerCapture(event.pointerId)) {
           renderer.domElement.releasePointerCapture(event.pointerId)
         }
@@ -866,8 +926,12 @@ function useTerrainScene({
 
       const onWheel = (event: WheelEvent) => {
         event.preventDefault()
-        distance = clamp(distance * (1 + event.deltaY * 0.0012), 12, 56)
+        distance = clamp(distance * (1 + event.deltaY * 0.0012), 4, 96)
         updateCamera()
+      }
+
+      const onContextMenu = (event: MouseEvent) => {
+        event.preventDefault()
       }
 
       renderer.domElement.addEventListener('pointerdown', onPointerDown)
@@ -875,6 +939,7 @@ function useTerrainScene({
       renderer.domElement.addEventListener('pointerup', onPointerUp)
       renderer.domElement.addEventListener('pointercancel', onPointerUp)
       renderer.domElement.addEventListener('wheel', onWheel, { passive: false })
+      renderer.domElement.addEventListener('contextmenu', onContextMenu)
 
       resizeObserver = new ResizeObserver(() => {
         const nextWidth = container.clientWidth || width
@@ -898,6 +963,7 @@ function useTerrainScene({
         renderer.domElement.removeEventListener('pointerup', onPointerUp)
         renderer.domElement.removeEventListener('pointercancel', onPointerUp)
         renderer.domElement.removeEventListener('wheel', onWheel)
+        renderer.domElement.removeEventListener('contextmenu', onContextMenu)
       }
 
       const canvas = renderer.domElement as HTMLCanvasElement & { __terrainCleanup?: () => void }
@@ -930,7 +996,7 @@ function useTerrainScene({
       renderer?.dispose?.()
       if (canvas && container.contains(canvas)) container.removeChild(canvas)
     }
-  }, [containerRef, grid, points, routePoints, verticalExaggeration, mapFeatures, visibleLayers])
+  }, [containerRef, grid, points, routePoints, selectedRouteKey, verticalExaggeration, mapFeatures, visibleLayers])
 }
 
 function formatElevation(value: number | null | undefined) {
@@ -1007,7 +1073,17 @@ function profileStats(profile: ProfilePoint[]): ProfileStats | null {
   }
 }
 
-function ElevationProfileChart({ profile, routePoints }: { profile: ProfilePoint[]; routePoints: RoutePoint[] }) {
+function ElevationProfileChart({
+  profile,
+  routePoints,
+  selectedRouteKey,
+  onSelectRoutePoint,
+}: {
+  profile: ProfilePoint[]
+  routePoints: RoutePoint[]
+  selectedRouteKey: string | null
+  onSelectRoutePoint: (routeKey: string) => void
+}) {
   const stats = profileStats(profile)
   if (!stats) {
     return (
@@ -1065,34 +1141,63 @@ function ElevationProfileChart({ profile, routePoints }: { profile: ProfilePoint
       <line x1={padLeft} x2={width - padRight} y1={height - padBottom} y2={height - padBottom} stroke="#9ca3af" />
       <line x1={padLeft} x2={padLeft} y1={padTop} y2={height - padBottom} stroke="#9ca3af" />
       {routeMarkers.map((marker) => {
-        const color = routePointColor(marker.index, routeMarkers.length)
+        const selected = marker.point.routeKey === selectedRouteKey
+        const color = selected ? '#db2777' : routePointColor(marker.index, routeMarkers.length)
         return (
           <g key={marker.point.routeKey}>
             <title>{`${marker.index + 1}. ${marker.point.label} / ${formatDistance(marker.distance)}`}</title>
+            <rect
+              x={marker.x - 9}
+              y={padTop}
+              width="18"
+              height={graphHeight}
+              fill="transparent"
+              className="cursor-pointer"
+              onClick={() => onSelectRoutePoint(marker.point.routeKey)}
+            />
             <line
               x1={marker.x}
               x2={marker.x}
               y1={padTop}
               y2={height - padBottom}
               stroke={color}
-              strokeWidth="1.5"
+              strokeWidth={selected ? '2.75' : '1.5'}
               strokeDasharray="5 5"
-              opacity="0.75"
+              opacity={selected ? '0.95' : '0.75'}
+              pointerEvents="none"
             />
           </g>
         )
       })}
       <polyline points={points} fill="none" stroke="#0f766e" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
       {routeMarkers.map((marker) => {
-        const color = routePointColor(marker.index, routeMarkers.length)
+        const selected = marker.point.routeKey === selectedRouteKey
+        const color = selected ? '#db2777' : routePointColor(marker.index, routeMarkers.length)
         const label = String(marker.index + 1)
         const badgeWidth = Math.max(22, label.length * 7 + 12)
         const badgeY = 18 + (marker.index % 2) * 22
         return (
-          <g key={`${marker.point.routeKey}-label`}>
+          <g
+            key={`${marker.point.routeKey}-label`}
+            className="cursor-pointer"
+            role="button"
+            tabIndex={0}
+            aria-label={`${marker.index + 1}. ${marker.point.label}`}
+            onClick={() => onSelectRoutePoint(marker.point.routeKey)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') onSelectRoutePoint(marker.point.routeKey)
+            }}
+          >
             <title>{`${marker.index + 1}. ${marker.point.label} / ${formatDistance(marker.distance)}`}</title>
             {marker.y !== null && (
-              <circle cx={marker.x} cy={marker.y} r="5.5" fill="#ffffff" stroke={color} strokeWidth="3" />
+              <circle
+                cx={marker.x}
+                cy={marker.y}
+                r={selected ? '8' : '5.5'}
+                fill="#ffffff"
+                stroke={color}
+                strokeWidth={selected ? '4' : '3'}
+              />
             )}
             <line
               x1={marker.x}
@@ -1111,7 +1216,7 @@ function ElevationProfileChart({ profile, routePoints }: { profile: ProfilePoint
               rx="10"
               fill={color}
               stroke="#ffffff"
-              strokeWidth="2"
+              strokeWidth={selected ? '3' : '2'}
             />
             <text
               x={marker.x}
@@ -1303,6 +1408,7 @@ export default function TerrainPageClient() {
   const [profileName, setProfileName] = useState('')
   const [profileMessage, setProfileMessage] = useState<string | null>(null)
   const [profileError, setProfileError] = useState<string | null>(null)
+  const [selectedRouteKey, setSelectedRouteKey] = useState<string | null>(null)
   const [mapFeatures, setMapFeatures] = useState<MapOverlayFeatures>(EMPTY_MAP_FEATURES)
   const [mapFeaturesLoading, setMapFeaturesLoading] = useState(true)
   const [mapFeaturesError, setMapFeaturesError] = useState<string | null>(null)
@@ -1483,6 +1589,12 @@ export default function TerrainPageClient() {
     setRoutePoints((current) => current.filter((point) => point.routeKey !== routeKey))
   }, [])
 
+  useEffect(() => {
+    if (!selectedRouteKey) return
+    if (routePoints.some((point) => point.routeKey === selectedRouteKey)) return
+    setSelectedRouteKey(null)
+  }, [routePoints, selectedRouteKey])
+
   const loadSavedRouteProfile = useCallback(
     (profileId: string) => {
       setSelectedProfileId(profileId)
@@ -1586,6 +1698,7 @@ export default function TerrainPageClient() {
     grid: terrainGrid,
     points,
     routePoints,
+    selectedRouteKey,
     verticalExaggeration,
     mapFeatures,
     visibleLayers,
@@ -1772,9 +1885,11 @@ export default function TerrainPageClient() {
                   bounds={TSUCHIURA_BOUNDS}
                   onSelectPoint={addRoutePoint}
                   onAddFreePoint={addFreeRoutePoint}
+                  onSelectRoutePoint={setSelectedRouteKey}
                   onExporterReady={registerMapExporter}
                   mapFeatures={mapFeatures}
                   visibleLayers={visibleLayers}
+                  selectedRouteKey={selectedRouteKey}
                 />
               </div>
             </section>
@@ -1844,7 +1959,12 @@ export default function TerrainPageClient() {
                   計算中
                 </div>
               ) : (
-                <ElevationProfileChart profile={profile} routePoints={routePoints} />
+                <ElevationProfileChart
+                  profile={profile}
+                  routePoints={routePoints}
+                  selectedRouteKey={selectedRouteKey}
+                  onSelectRoutePoint={setSelectedRouteKey}
+                />
               )}
             </div>
           </section>
