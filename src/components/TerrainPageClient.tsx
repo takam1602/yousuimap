@@ -455,12 +455,40 @@ async function responseError(response: Response) {
     const body = await response.json()
     if (isRecord(body)) {
       if (typeof body.error === 'string') return body.error
+      if (isRecord(body.error)) {
+        const error = body.error
+        const parts = [
+          typeof error.message === 'string' ? error.message : null,
+          typeof error.details === 'string' ? error.details : null,
+          typeof error.hint === 'string' ? error.hint : null,
+          typeof error.code === 'string' ? `code: ${error.code}` : null,
+        ].filter(Boolean)
+        if (parts.length) return parts.join(' / ')
+      }
       if (body.error) return JSON.stringify(body.error)
     }
   } catch {
     // ignore non-JSON error body
   }
   return `${response.status} ${response.statusText}`.trim()
+}
+
+function profileActionErrorMessage(error: unknown, action: '保存' | '削除') {
+  const message = error instanceof Error ? error.message : ''
+  if (message === 'ログインが必要です' || message === 'Login is required') {
+    return 'GitHub ログインが必要です。'
+  }
+  if (message.includes('Supabase is not configured') || message.includes('environment variables are missing')) {
+    return `共有プロファイルの${action}に失敗しました: Supabase のサーバー環境変数が未設定です。`
+  }
+  if (message.includes('terrain_profiles') && message.includes('does not exist')) {
+    return `共有プロファイルの${action}に失敗しました: Supabase に terrain_profiles テーブルがありません。マイグレーションを適用してください。`
+  }
+  if (message.includes('row-level security') || message.includes('violates row-level security')) {
+    return `共有プロファイルの${action}に失敗しました: Supabase の権限設定を確認してください。サーバー側には service role key が必要です。`
+  }
+  if (!message) return `共有プロファイルの${action}に失敗しました。`
+  return `共有プロファイルの${action}に失敗しました: ${message}`
 }
 
 function routeIsInitialFallback(routePoints: RoutePoint[]) {
@@ -1306,15 +1334,16 @@ export default function TerrainPageClient() {
         setSavedProfiles(loadedProfiles)
         setProfileName(nextProfileName(loadedProfiles))
       })
-      .catch(() => {
+      .catch((error) => {
         if (cancelled) return
         const localProfiles = loadSavedProfiles()
+        const detail = error instanceof Error && error.message ? `: ${error.message}` : ''
         setSavedProfiles(localProfiles)
         setProfileName(nextProfileName(localProfiles))
         setProfileError(
           localProfiles.length
-            ? '共有プロファイルを読み込めませんでした。端末内の旧プロファイルを表示しています。'
-            : '共有プロファイルを読み込めませんでした。'
+            ? `共有プロファイルを読み込めませんでした${detail}。端末内の旧プロファイルを表示しています。`
+            : `共有プロファイルを読み込めませんでした${detail}。`
         )
       })
       .finally(() => {
@@ -1503,9 +1532,7 @@ export default function TerrainPageClient() {
       setProfileMessage('共有プロファイルに保存しました。')
     } catch (error) {
       console.error(error)
-      setProfileError(error instanceof Error && error.message === 'ログインが必要です'
-        ? 'GitHub ログインが必要です。'
-        : '共有プロファイルの保存に失敗しました。')
+      setProfileError(profileActionErrorMessage(error, '保存'))
     } finally {
       setProfileActionLoading(false)
     }
@@ -1533,18 +1560,11 @@ export default function TerrainPageClient() {
       setProfileMessage('共有プロファイルを削除しました。')
     } catch (error) {
       console.error(error)
-      setProfileError(error instanceof Error && error.message === 'ログインが必要です'
-        ? 'GitHub ログインが必要です。'
-        : '共有プロファイルの削除に失敗しました。')
+      setProfileError(profileActionErrorMessage(error, '削除'))
     } finally {
       setProfileActionLoading(false)
     }
   }, [authHeaders, isGithubUser, savedProfiles, selectedProfileId, user?.id])
-
-  useEffect(() => {
-    if (profileName || selectedProfileId) return
-    setProfileName(nextProfileName(savedProfiles))
-  }, [profileName, savedProfiles, selectedProfileId])
 
   const refreshProfile = useCallback(() => {
     if (routePoints.length < 2) {

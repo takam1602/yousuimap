@@ -67,7 +67,7 @@ export async function GET(req: NextRequest) {
   const mapSlug = mapSlugFromRequest(req)
   if (!mapSlug) return NextResponse.json({ error: 'Unknown map' }, { status: 404 })
 
-  if (!hasSupabaseServerEnv()) return NextResponse.json([])
+  if (!hasSupabaseServerEnv()) return NextResponse.json({ error: 'Supabase is not configured' }, { status: 500 })
 
   const supabase = createSupabaseAdmin()
   const { data, error } = await supabase
