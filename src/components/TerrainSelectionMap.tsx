@@ -23,6 +23,35 @@ type RoutePoint = SelectionPoint & {
   source: 'note' | 'custom'
 }
 
+type MapLayerKey = 'river' | 'rail' | 'road' | 'boundary' | 'place' | 'station'
+
+type MapFeaturePoint = {
+  lat: number
+  lng: number
+}
+
+type MapLineFeature = {
+  id: string
+  layer: MapLayerKey
+  name: string
+  points: MapFeaturePoint[]
+}
+
+type MapLabelFeature = {
+  id: string
+  layer: MapLayerKey
+  name: string
+  lat: number
+  lng: number
+}
+
+type MapOverlayFeatures = {
+  lines: MapLineFeature[]
+  labels: MapLabelFeature[]
+}
+
+type MapLayerVisibility = Record<MapLayerKey, boolean>
+
 type ExportedMapImage = {
   dataUrl: string
   width: number
@@ -38,11 +67,15 @@ type TerrainSelectionMapProps = {
   onSelectPoint: (point: SelectionPoint) => void
   onAddFreePoint: (lat: number, lng: number) => void
   onExporterReady?: (exporter: MapExporter | null) => void
+  mapFeatures: MapOverlayFeatures
+  visibleLayers: MapLayerVisibility
 }
 
 type LatestMapData = {
   points: SelectionPoint[]
   routePoints: RoutePoint[]
+  mapFeatures: MapOverlayFeatures
+  visibleLayers: MapLayerVisibility
 }
 
 function boundsToLatLng(bounds: Bounds): L.LatLngBoundsExpression {
@@ -56,6 +89,46 @@ function routeColor(index: number, total: number) {
   if (index === 0) return '#0284c7'
   if (index === total - 1) return '#16a34a'
   return '#f59e0b'
+}
+
+function layerColor(layer: MapLayerKey) {
+  if (layer === 'river') return '#2563eb'
+  if (layer === 'rail') return '#111827'
+  if (layer === 'road') return '#f97316'
+  if (layer === 'boundary') return '#7c3aed'
+  if (layer === 'station') return '#be123c'
+  return '#047857'
+}
+
+function layerWeight(layer: MapLayerKey) {
+  if (layer === 'road') return 3
+  if (layer === 'rail') return 2.5
+  if (layer === 'boundary') return 2
+  return 2.4
+}
+
+function layerDash(layer: MapLayerKey) {
+  if (layer === 'boundary') return '6 5'
+  if (layer === 'rail') return '8 4'
+  return undefined
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;')
+}
+
+function labelIcon(feature: MapLabelFeature) {
+  const color = layerColor(feature.layer)
+  return L.divIcon({
+    className: '',
+    html: `<div style="display:inline-block;white-space:nowrap;border:1px solid #cbd5e1;border-radius:6px;background:rgba(255,255,255,.9);padding:2px 6px;color:${color};font-size:11px;font-weight:700;box-shadow:0 1px 2px rgba(15,23,42,.16)">${escapeHtml(feature.name)}</div>`,
+    iconAnchor: [0, 0],
+  })
 }
 
 function popupContent(title: string, subText?: string) {
@@ -109,21 +182,24 @@ export default function TerrainSelectionMap({
   onSelectPoint,
   onAddFreePoint,
   onExporterReady,
+  mapFeatures,
+  visibleLayers,
 }: TerrainSelectionMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const baseLayerRef = useRef<L.LayerGroup | null>(null)
+  const featureLayerRef = useRef<L.LayerGroup | null>(null)
   const routeLayerRef = useRef<L.LayerGroup | null>(null)
   const callbacksRef = useRef({ onSelectPoint, onAddFreePoint })
-  const latestDataRef = useRef<LatestMapData>({ points, routePoints })
+  const latestDataRef = useRef<LatestMapData>({ points, routePoints, mapFeatures, visibleLayers })
 
   useEffect(() => {
     callbacksRef.current = { onSelectPoint, onAddFreePoint }
   }, [onSelectPoint, onAddFreePoint])
 
   useEffect(() => {
-    latestDataRef.current = { points, routePoints }
-  }, [points, routePoints])
+    latestDataRef.current = { points, routePoints, mapFeatures, visibleLayers }
+  }, [points, routePoints, mapFeatures, visibleLayers])
 
   const exportCurrentMap = useCallback(async () => {
     const map = mapRef.current
@@ -175,8 +251,51 @@ export default function TerrainSelectionMap({
 
     await Promise.all(tileJobs)
 
-    const { points: latestPoints, routePoints: latestRoutePoints } = latestDataRef.current
+    const {
+      points: latestPoints,
+      routePoints: latestRoutePoints,
+      mapFeatures: latestMapFeatures,
+      visibleLayers: latestVisibleLayers,
+    } = latestDataRef.current
     const mapBounds = map.getBounds()
+
+    latestMapFeatures.lines.forEach((feature) => {
+      if (!latestVisibleLayers[feature.layer]) return
+      const positions = feature.points
+        .filter((point) => mapBounds.contains([point.lat, point.lng]))
+        .map((point) => map.latLngToContainerPoint([point.lat, point.lng]))
+      if (positions.length < 2) return
+      context.beginPath()
+      positions.forEach((position, index) => {
+        if (index === 0) context.moveTo(position.x, position.y)
+        else context.lineTo(position.x, position.y)
+      })
+      context.strokeStyle = layerColor(feature.layer)
+      context.lineWidth = layerWeight(feature.layer)
+      context.setLineDash(feature.layer === 'boundary' ? [6, 5] : feature.layer === 'rail' ? [8, 4] : [])
+      context.lineJoin = 'round'
+      context.lineCap = 'round'
+      context.stroke()
+      context.setLineDash([])
+    })
+
+    latestMapFeatures.labels.forEach((feature) => {
+      if (!latestVisibleLayers[feature.layer] || !mapBounds.contains([feature.lat, feature.lng])) return
+      const position = map.latLngToContainerPoint([feature.lat, feature.lng])
+      const label = feature.name.slice(0, 18)
+      context.font = 'bold 11px sans-serif'
+      const labelWidth = Math.ceil(context.measureText(label).width) + 12
+      context.fillStyle = 'rgba(255,255,255,0.9)'
+      context.strokeStyle = '#cbd5e1'
+      context.lineWidth = 1
+      context.fillRect(position.x, position.y, labelWidth, 18)
+      context.strokeRect(position.x, position.y, labelWidth, 18)
+      context.fillStyle = layerColor(feature.layer)
+      context.textAlign = 'left'
+      context.textBaseline = 'middle'
+      context.fillText(label, position.x + 6, position.y + 9)
+    })
+
     latestPoints.forEach((point) => {
       if (!mapBounds.contains([point.lat, point.lng])) return
       const markerPoint = map.latLngToContainerPoint([point.lat, point.lng])
@@ -246,8 +365,10 @@ export default function TerrainSelectionMap({
       crossOrigin: true,
     }).addTo(map)
 
+    const featureLayer = L.layerGroup().addTo(map)
     const baseLayer = L.layerGroup().addTo(map)
     const routeLayer = L.layerGroup().addTo(map)
+    featureLayerRef.current = featureLayer
     baseLayerRef.current = baseLayer
     routeLayerRef.current = routeLayer
     mapRef.current = map
@@ -262,10 +383,35 @@ export default function TerrainSelectionMap({
     return () => {
       map.remove()
       mapRef.current = null
+      featureLayerRef.current = null
       baseLayerRef.current = null
       routeLayerRef.current = null
     }
   }, [bounds])
+
+  useEffect(() => {
+    const featureLayer = featureLayerRef.current
+    if (!featureLayer) return
+
+    featureLayer.clearLayers()
+    mapFeatures.lines.forEach((feature) => {
+      if (!visibleLayers[feature.layer]) return
+      const positions = feature.points.map((point) => [point.lat, point.lng] as [number, number])
+      if (positions.length < 2) return
+      L.polyline(positions, {
+        color: layerColor(feature.layer),
+        weight: layerWeight(feature.layer),
+        opacity: 0.86,
+        dashArray: layerDash(feature.layer),
+      })
+        .bindTooltip(escapeHtml(feature.name || feature.layer), { sticky: true })
+        .addTo(featureLayer)
+    })
+    mapFeatures.labels.forEach((feature) => {
+      if (!visibleLayers[feature.layer]) return
+      L.marker([feature.lat, feature.lng], { icon: labelIcon(feature), interactive: false }).addTo(featureLayer)
+    })
+  }, [mapFeatures, visibleLayers])
 
   useEffect(() => {
     const baseLayer = baseLayerRef.current

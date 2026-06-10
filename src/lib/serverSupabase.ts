@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type User } from '@supabase/supabase-js'
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -17,7 +17,18 @@ export function hasSupabaseServerEnv() {
   return Boolean(supabaseUrl && serviceRoleKey)
 }
 
-export async function requireEditor(req: NextRequest) {
+function userHasGithubProvider(user: User) {
+  const appMetadata = user.app_metadata as Record<string, unknown>
+  const provider = appMetadata.provider
+  const providers = appMetadata.providers
+
+  return (
+    provider === 'github' ||
+    (Array.isArray(providers) && providers.some((item) => item === 'github'))
+  )
+}
+
+async function getAuthenticatedUser(req: NextRequest) {
   const authHeader = req.headers.get('authorization')
   const token = authHeader?.match(/^Bearer\s+(.+)$/i)?.[1]
 
@@ -45,6 +56,26 @@ export async function requireEditor(req: NextRequest) {
     }
   }
 
+  return { user: data.user }
+}
+
+export async function requireGithubUser(req: NextRequest) {
+  const auth = await getAuthenticatedUser(req)
+  if ('error' in auth) return auth
+
+  if (!userHasGithubProvider(auth.user)) {
+    return {
+      error: NextResponse.json({ error: 'GitHub login is required' }, { status: 403 }),
+    }
+  }
+
+  return auth
+}
+
+export async function requireEditor(req: NextRequest) {
+  const auth = await getAuthenticatedUser(req)
+  if ('error' in auth) return auth
+
   const allowedEmails = (
     process.env.SUPABASE_EDITOR_EMAILS ??
     process.env.EDITOR_EMAILS ??
@@ -56,12 +87,12 @@ export async function requireEditor(req: NextRequest) {
 
   if (
     allowedEmails.length > 0 &&
-    !allowedEmails.includes((data.user.email ?? '').toLowerCase())
+    !allowedEmails.includes((auth.user.email ?? '').toLowerCase())
   ) {
     return {
       error: NextResponse.json({ error: 'Editor permission is required' }, { status: 403 }),
     }
   }
 
-  return { user: data.user }
+  return auth
 }

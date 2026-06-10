@@ -2,6 +2,7 @@
 
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
+import { useAuth } from '@/contexts/AuthContext'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import {
@@ -110,7 +111,38 @@ type SavedRouteProfile = {
   points: SavedRoutePoint[]
   createdAt: string
   updatedAt: string
+  createdBy?: string
+  createdByLogin?: string
 }
+
+type MapLayerKey = 'river' | 'rail' | 'road' | 'boundary' | 'place' | 'station'
+
+type MapFeaturePoint = {
+  lat: number
+  lng: number
+}
+
+type MapLineFeature = {
+  id: string
+  layer: MapLayerKey
+  name: string
+  points: MapFeaturePoint[]
+}
+
+type MapLabelFeature = {
+  id: string
+  layer: MapLayerKey
+  name: string
+  lat: number
+  lng: number
+}
+
+type MapOverlayFeatures = {
+  lines: MapLineFeature[]
+  labels: MapLabelFeature[]
+}
+
+type MapLayerVisibility = Record<MapLayerKey, boolean>
 
 type ExportedMapImage = {
   dataUrl: string
@@ -122,6 +154,9 @@ type MapExporter = () => Promise<ExportedMapImage>
 
 const MAP_SLUG = 'tsuchiura-yosui'
 const SAVED_PROFILES_STORAGE_KEY = `terrain-profiles:${MAP_SLUG}:v1`
+const TERRAIN_PROFILES_ENDPOINT = `/api/terrain-profiles?map=${encodeURIComponent(MAP_SLUG)}`
+const terrainProfileEndpoint = (profileId: string) =>
+  `/api/terrain-profiles/${encodeURIComponent(profileId)}?map=${encodeURIComponent(MAP_SLUG)}`
 const THREE_URL = 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js'
 const DEM_ZOOM = 14
 const TERRAIN_ROWS = 56
@@ -130,6 +165,26 @@ const MAX_RENDERED_MARKERS = 1200
 const MAX_PROFILE_SAMPLES = 1200
 const MIN_PROFILE_SAMPLES = 80
 const METERS_PER_PROFILE_SAMPLE = 45
+const MAX_RENDERED_LABELS = 80
+
+const EMPTY_MAP_FEATURES: MapOverlayFeatures = { lines: [], labels: [] }
+const MAP_LAYER_KEYS: MapLayerKey[] = ['river', 'rail', 'road', 'boundary', 'place', 'station']
+const INITIAL_LAYER_VISIBILITY: MapLayerVisibility = {
+  river: true,
+  rail: true,
+  road: false,
+  boundary: false,
+  place: true,
+  station: true,
+}
+const MAP_LAYER_OPTIONS: { key: MapLayerKey; label: string; description: string; color: string }[] = [
+  { key: 'river', label: '河川・水路', description: '河川、用水路、排水路', color: '#2563eb' },
+  { key: 'rail', label: '鉄道', description: '鉄道路線', color: '#111827' },
+  { key: 'road', label: '主要道路', description: '高速・国道・主要地方道', color: '#f97316' },
+  { key: 'boundary', label: '市町村境界', description: '行政境界', color: '#7c3aed' },
+  { key: 'place', label: '主要地名', description: '市街地・町名', color: '#047857' },
+  { key: 'station', label: '主要駅名', description: '鉄道駅', color: '#be123c' },
+]
 
 const TSUCHIURA_BOUNDS: Bounds = {
   north: 36.16,
@@ -285,6 +340,8 @@ function normalizeSavedProfiles(value: unknown): SavedRouteProfile[] {
         points,
         createdAt: typeof profile.createdAt === 'string' ? profile.createdAt : now,
         updatedAt: typeof profile.updatedAt === 'string' ? profile.updatedAt : now,
+        createdBy: typeof profile.createdBy === 'string' ? profile.createdBy : undefined,
+        createdByLogin: typeof profile.createdByLogin === 'string' ? profile.createdByLogin : undefined,
       },
     ]
   })
@@ -297,11 +354,6 @@ function loadSavedProfiles() {
   } catch {
     return []
   }
-}
-
-function saveProfilesToStorage(profiles: SavedRouteProfile[]) {
-  if (typeof window === 'undefined') return
-  window.localStorage.setItem(SAVED_PROFILES_STORAGE_KEY, JSON.stringify(profiles))
 }
 
 function serializeRoutePoint(point: RoutePoint): SavedRoutePoint {
@@ -329,6 +381,86 @@ function nextProfileName(profiles: SavedRouteProfile[]) {
 
 function createProfileId() {
   return `profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function isMapLayerKey(value: unknown): value is MapLayerKey {
+  return typeof value === 'string' && MAP_LAYER_KEYS.includes(value as MapLayerKey)
+}
+
+function normalizeMapFeaturePoint(value: unknown): MapFeaturePoint | null {
+  if (!isRecord(value)) return null
+  const lat = Number(value.lat)
+  const lng = Number(value.lng)
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+  return { lat, lng }
+}
+
+function normalizeMapFeatures(value: unknown): MapOverlayFeatures {
+  if (!isRecord(value)) return EMPTY_MAP_FEATURES
+
+  const lines = Array.isArray(value.lines)
+    ? value.lines.flatMap((feature): MapLineFeature[] => {
+        if (!isRecord(feature) || !isMapLayerKey(feature.layer) || !Array.isArray(feature.points)) return []
+        const points = feature.points.flatMap((point): MapFeaturePoint[] => {
+          const normalized = normalizeMapFeaturePoint(point)
+          return normalized ? [normalized] : []
+        })
+        if (points.length < 2) return []
+        return [{
+          id: typeof feature.id === 'string' ? feature.id : `${feature.layer}-${points[0].lat}-${points[0].lng}`,
+          layer: feature.layer,
+          name: typeof feature.name === 'string' ? feature.name : '',
+          points,
+        }]
+      })
+    : []
+
+  const labels = Array.isArray(value.labels)
+    ? value.labels.flatMap((feature): MapLabelFeature[] => {
+        if (!isRecord(feature) || !isMapLayerKey(feature.layer)) return []
+        const point = normalizeMapFeaturePoint(feature)
+        if (!point || typeof feature.name !== 'string' || !feature.name.trim()) return []
+        return [{
+          id: typeof feature.id === 'string' ? feature.id : `${feature.layer}-${point.lat}-${point.lng}`,
+          layer: feature.layer,
+          name: feature.name,
+          lat: point.lat,
+          lng: point.lng,
+        }]
+      })
+    : []
+
+  return { lines, labels }
+}
+
+function mapFeaturesEndpoint(bounds: Bounds) {
+  const params = new URLSearchParams({
+    north: String(bounds.north),
+    south: String(bounds.south),
+    west: String(bounds.west),
+    east: String(bounds.east),
+  })
+  return `/api/map-features?${params}`
+}
+
+function isGithubAuthenticatedUser(user: { app_metadata?: Record<string, unknown> } | null | undefined) {
+  const metadata = user?.app_metadata ?? {}
+  const provider = metadata.provider
+  const providers = metadata.providers
+  return provider === 'github' || (Array.isArray(providers) && providers.includes('github'))
+}
+
+async function responseError(response: Response) {
+  try {
+    const body = await response.json()
+    if (isRecord(body)) {
+      if (typeof body.error === 'string') return body.error
+      if (body.error) return JSON.stringify(body.error)
+    }
+  } catch {
+    // ignore non-JSON error body
+  }
+  return `${response.status} ${response.statusText}`.trim()
 }
 
 function routeIsInitialFallback(routePoints: RoutePoint[]) {
@@ -443,12 +575,16 @@ function useTerrainScene({
   points,
   routePoints,
   verticalExaggeration,
+  mapFeatures,
+  visibleLayers,
 }: {
   containerRef: RefObject<HTMLDivElement | null>
   grid: TerrainGrid | null
   points: TerrainPoint[]
   routePoints: RoutePoint[]
   verticalExaggeration: number
+  mapFeatures: MapOverlayFeatures
+  visibleLayers: MapLayerVisibility
 }) {
   useEffect(() => {
     const container = containerRef.current
@@ -538,6 +674,81 @@ function useTerrainScene({
       const directionalLight = new THREE.DirectionalLight(0xffffff, 1.05)
       directionalLight.position.set(-8, 14, 10)
       scene.add(directionalLight)
+
+      const layerColors: Record<MapLayerKey, number> = {
+        river: 0x2563eb,
+        rail: 0x111827,
+        road: 0xf97316,
+        boundary: 0x7c3aed,
+        place: 0x047857,
+        station: 0xbe123c,
+      }
+      const lineLayerYOffset: Record<MapLayerKey, number> = {
+        river: 0.1,
+        rail: 0.16,
+        road: 0.13,
+        boundary: 0.2,
+        place: 0.22,
+        station: 0.24,
+      }
+      const createLabelSprite = (text: string, color: number) => {
+        const canvas = document.createElement('canvas')
+        const context = canvas.getContext('2d')
+        const label = text.slice(0, 18)
+        const font = 'bold 28px sans-serif'
+        if (context) context.font = font
+        const width = Math.ceil(Math.max(80, context ? context.measureText(label).width + 24 : label.length * 18 + 24))
+        const height = 44
+        canvas.width = width
+        canvas.height = height
+        if (context) {
+          context.font = font
+          context.textBaseline = 'middle'
+          context.fillStyle = 'rgba(255,255,255,0.88)'
+          context.strokeStyle = '#cbd5e1'
+          context.lineWidth = 2
+          context.beginPath()
+          context.roundRect(1, 1, width - 2, height - 2, 8)
+          context.fill()
+          context.stroke()
+          context.fillStyle = `#${color.toString(16).padStart(6, '0')}`
+          context.fillText(label, 12, height / 2 + 1)
+        }
+        const texture = new THREE.CanvasTexture(canvas)
+        const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false })
+        const sprite = new THREE.Sprite(material)
+        sprite.scale.set(width * 0.008, height * 0.008, 1)
+        return sprite
+      }
+
+      const featureGroup = new THREE.Group()
+      mapFeatures.lines.forEach((feature) => {
+        if (!visibleLayers[feature.layer]) return
+        const featurePositions = feature.points
+          .filter((point) => isInsideBounds(point, grid.bounds))
+          .map((point) => {
+            const position = toScenePoint(point)
+            position.y += lineLayerYOffset[feature.layer]
+            return position
+          })
+        if (featurePositions.length < 2) return
+        const line = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(featurePositions),
+          new THREE.LineBasicMaterial({ color: layerColors[feature.layer], linewidth: 2 })
+        )
+        featureGroup.add(line)
+      })
+      mapFeatures.labels
+        .filter((feature) => visibleLayers[feature.layer] && isInsideBounds(feature, grid.bounds))
+        .slice(0, MAX_RENDERED_LABELS)
+        .forEach((feature) => {
+          const sprite = createLabelSprite(feature.name, layerColors[feature.layer])
+          const position = toScenePoint(feature)
+          sprite.position.copy(position)
+          sprite.position.y += feature.layer === 'station' ? 0.72 : 0.6
+          featureGroup.add(sprite)
+        })
+      scene.add(featureGroup)
 
       const markerGroup = new THREE.Group()
       const markerGeometry = new THREE.SphereGeometry(0.052, 10, 8)
@@ -680,14 +891,18 @@ function useTerrainScene({
       if (scene) {
         scene.traverse((object: any) => {
           object.geometry?.dispose?.()
-          if (Array.isArray(object.material)) object.material.forEach((mat: any) => mat.dispose?.())
-          else object.material?.dispose?.()
+          const disposeMaterial = (material: any) => {
+            material?.map?.dispose?.()
+            material?.dispose?.()
+          }
+          if (Array.isArray(object.material)) object.material.forEach(disposeMaterial)
+          else disposeMaterial(object.material)
         })
       }
       renderer?.dispose?.()
       if (canvas && container.contains(canvas)) container.removeChild(canvas)
     }
-  }, [containerRef, grid, points, routePoints, verticalExaggeration])
+  }, [containerRef, grid, points, routePoints, verticalExaggeration, mapFeatures, visibleLayers])
 }
 
 function formatElevation(value: number | null | undefined) {
@@ -698,6 +913,42 @@ function formatElevation(value: number | null | undefined) {
 function formatDistance(value: number) {
   if (value >= 1000) return `${(value / 1000).toFixed(2)} km`
   return `${value.toFixed(0)} m`
+}
+
+function routePointColor(index: number, total: number) {
+  if (index === 0) return '#0284c7'
+  if (index === total - 1) return '#16a34a'
+  return '#f59e0b'
+}
+
+function routePointDistances(routePoints: RoutePoint[]) {
+  let distance = 0
+  return routePoints.map((point, index) => {
+    const marker = { point, index, distance }
+    if (index < routePoints.length - 1) {
+      distance += haversineMeters(point, routePoints[index + 1])
+    }
+    return marker
+  })
+}
+
+function elevationAtDistance(profile: ProfilePoint[], distance: number) {
+  const points = profile.filter((point) => point.elevation !== null)
+  if (!points.length) return null
+  if (distance <= points[0].distance) return points[0].elevation
+
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1]
+    const current = points[index]
+    if (distance > current.distance) continue
+
+    const segmentDistance = current.distance - previous.distance
+    if (segmentDistance <= 0) return current.elevation
+    const t = clamp((distance - previous.distance) / segmentDistance, 0, 1)
+    return (previous.elevation ?? 0) + ((current.elevation ?? 0) - (previous.elevation ?? 0)) * t
+  }
+
+  return points.at(-1)?.elevation ?? null
 }
 
 function profileStats(profile: ProfilePoint[]): ProfileStats | null {
@@ -728,7 +979,7 @@ function profileStats(profile: ProfilePoint[]): ProfileStats | null {
   }
 }
 
-function ElevationProfileChart({ profile }: { profile: ProfilePoint[] }) {
+function ElevationProfileChart({ profile, routePoints }: { profile: ProfilePoint[]; routePoints: RoutePoint[] }) {
   const stats = profileStats(profile)
   if (!stats) {
     return (
@@ -739,10 +990,10 @@ function ElevationProfileChart({ profile }: { profile: ProfilePoint[] }) {
   }
 
   const width = 1040
-  const height = 320
+  const height = 340
   const padLeft = 58
   const padRight = 28
-  const padTop = 24
+  const padTop = 58
   const padBottom = 46
   const graphWidth = width - padLeft - padRight
   const graphHeight = height - padTop - padBottom
@@ -756,6 +1007,15 @@ function ElevationProfileChart({ profile }: { profile: ProfilePoint[] }) {
       return `${x.toFixed(1)},${y.toFixed(1)}`
     })
     .join(' ')
+  const routeMarkers = routePointDistances(routePoints)
+    .filter((marker) => marker.distance >= 0 && marker.distance <= totalDistance)
+    .map((marker) => {
+      const elevation = elevationAtDistance(profile, marker.distance)
+      const x = padLeft + (marker.distance / totalDistance) * graphWidth
+      const y =
+        elevation === null ? null : padTop + ((stats.max - elevation) / elevationRange) * graphHeight
+      return { ...marker, elevation, x, y }
+    })
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="h-80 w-full overflow-visible">
@@ -776,7 +1036,68 @@ function ElevationProfileChart({ profile }: { profile: ProfilePoint[] }) {
       ))}
       <line x1={padLeft} x2={width - padRight} y1={height - padBottom} y2={height - padBottom} stroke="#9ca3af" />
       <line x1={padLeft} x2={padLeft} y1={padTop} y2={height - padBottom} stroke="#9ca3af" />
+      {routeMarkers.map((marker) => {
+        const color = routePointColor(marker.index, routeMarkers.length)
+        return (
+          <g key={marker.point.routeKey}>
+            <title>{`${marker.index + 1}. ${marker.point.label} / ${formatDistance(marker.distance)}`}</title>
+            <line
+              x1={marker.x}
+              x2={marker.x}
+              y1={padTop}
+              y2={height - padBottom}
+              stroke={color}
+              strokeWidth="1.5"
+              strokeDasharray="5 5"
+              opacity="0.75"
+            />
+          </g>
+        )
+      })}
       <polyline points={points} fill="none" stroke="#0f766e" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
+      {routeMarkers.map((marker) => {
+        const color = routePointColor(marker.index, routeMarkers.length)
+        const label = String(marker.index + 1)
+        const badgeWidth = Math.max(22, label.length * 7 + 12)
+        const badgeY = 18 + (marker.index % 2) * 22
+        return (
+          <g key={`${marker.point.routeKey}-label`}>
+            <title>{`${marker.index + 1}. ${marker.point.label} / ${formatDistance(marker.distance)}`}</title>
+            {marker.y !== null && (
+              <circle cx={marker.x} cy={marker.y} r="5.5" fill="#ffffff" stroke={color} strokeWidth="3" />
+            )}
+            <line
+              x1={marker.x}
+              x2={marker.x}
+              y1={badgeY + 10}
+              y2={padTop}
+              stroke={color}
+              strokeWidth="1"
+              opacity="0.45"
+            />
+            <rect
+              x={marker.x - badgeWidth / 2}
+              y={badgeY - 10}
+              width={badgeWidth}
+              height="20"
+              rx="10"
+              fill={color}
+              stroke="#ffffff"
+              strokeWidth="2"
+            />
+            <text
+              x={marker.x}
+              y={badgeY + 4}
+              fill="#ffffff"
+              fontSize="12"
+              fontWeight="700"
+              textAnchor="middle"
+            >
+              {label}
+            </text>
+          </g>
+        )
+      })}
       <text x={padLeft} y={height - 8} fill="#6b7280" fontSize="12">0</text>
       <text x={width - padRight - 74} y={height - 8} fill="#6b7280" fontSize="12">
         {formatDistance(stats.distance)}
@@ -932,6 +1253,8 @@ function downloadCanvasPng(canvas: HTMLCanvasElement, filename: string) {
 }
 
 export default function TerrainPageClient() {
+  const { session, user, loading: authLoading } = useAuth()
+  const isGithubUser = useMemo(() => isGithubAuthenticatedUser(user), [user])
   const sceneRef = useRef<HTMLDivElement | null>(null)
   const profileChartRef = useRef<HTMLDivElement | null>(null)
   const mapExporterRef = useRef<MapExporter | null>(null)
@@ -946,23 +1269,90 @@ export default function TerrainPageClient() {
   const [verticalExaggeration, setVerticalExaggeration] = useState(12)
   const [pointSearch, setPointSearch] = useState('')
   const [savedProfiles, setSavedProfiles] = useState<SavedRouteProfile[]>([])
-  const [savedProfilesLoaded, setSavedProfilesLoaded] = useState(false)
+  const [profilesLoading, setProfilesLoading] = useState(true)
+  const [profileActionLoading, setProfileActionLoading] = useState(false)
   const [selectedProfileId, setSelectedProfileId] = useState('')
   const [profileName, setProfileName] = useState('')
+  const [profileMessage, setProfileMessage] = useState<string | null>(null)
+  const [profileError, setProfileError] = useState<string | null>(null)
+  const [mapFeatures, setMapFeatures] = useState<MapOverlayFeatures>(EMPTY_MAP_FEATURES)
+  const [mapFeaturesLoading, setMapFeaturesLoading] = useState(true)
+  const [mapFeaturesError, setMapFeaturesError] = useState<string | null>(null)
+  const [visibleLayers, setVisibleLayers] = useState<MapLayerVisibility>(INITIAL_LAYER_VISIBILITY)
   const [exportingPng, setExportingPng] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
 
+  const authHeaders = useCallback((json = false) => {
+    if (!session?.access_token) throw new Error('ログインが必要です')
+    return {
+      ...(json ? { 'Content-Type': 'application/json' } : {}),
+      Authorization: `Bearer ${session.access_token}`,
+    }
+  }, [session])
+
   useEffect(() => {
-    const loadedProfiles = loadSavedProfiles()
-    setSavedProfiles(loadedProfiles)
-    setProfileName(nextProfileName(loadedProfiles))
-    setSavedProfilesLoaded(true)
+    let cancelled = false
+    setProfilesLoading(true)
+    setProfileError(null)
+
+    fetch(TERRAIN_PROFILES_ENDPOINT)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseError(response))
+        return response.json()
+      })
+      .then((data) => {
+        if (cancelled) return
+        const loadedProfiles = normalizeSavedProfiles(data)
+        setSavedProfiles(loadedProfiles)
+        setProfileName(nextProfileName(loadedProfiles))
+      })
+      .catch(() => {
+        if (cancelled) return
+        const localProfiles = loadSavedProfiles()
+        setSavedProfiles(localProfiles)
+        setProfileName(nextProfileName(localProfiles))
+        setProfileError(
+          localProfiles.length
+            ? '共有プロファイルを読み込めませんでした。端末内の旧プロファイルを表示しています。'
+            : '共有プロファイルを読み込めませんでした。'
+        )
+      })
+      .finally(() => {
+        if (!cancelled) setProfilesLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   useEffect(() => {
-    if (!savedProfilesLoaded) return
-    saveProfilesToStorage(savedProfiles)
-  }, [savedProfiles, savedProfilesLoaded])
+    let cancelled = false
+    setMapFeaturesLoading(true)
+    setMapFeaturesError(null)
+
+    fetch(mapFeaturesEndpoint(TSUCHIURA_BOUNDS))
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseError(response))
+        return response.json()
+      })
+      .then((data) => {
+        if (!cancelled) setMapFeatures(normalizeMapFeatures(data))
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setMapFeatures(EMPTY_MAP_FEATURES)
+          setMapFeaturesError('地図レイヤーを読み込めませんでした。')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setMapFeaturesLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const registerMapExporter = useCallback((exporter: MapExporter | null) => {
     mapExporterRef.current = exporter
@@ -1080,34 +1470,76 @@ export default function TerrainPageClient() {
     setProfileName(nextProfileName(savedProfiles))
   }, [savedProfiles])
 
-  const saveCurrentRouteProfile = useCallback(() => {
-    if (routePoints.length < 2) return
+  const saveCurrentRouteProfile = useCallback(async () => {
+    if (routePoints.length < 2 || !isGithubUser) return
 
-    const now = new Date().toISOString()
+    const selectedProfile = savedProfiles.find((item) => item.id === selectedProfileId) ?? null
+    if (selectedProfile?.createdBy && selectedProfile.createdBy !== user?.id) return
+
     const name = profileName.trim() || nextProfileName(savedProfiles)
     const pointsToSave = routePoints.map(serializeRoutePoint)
-    const existingId = selectedProfileId && savedProfiles.some((item) => item.id === selectedProfileId) ? selectedProfileId : ''
-    const nextId = existingId || createProfileId()
+    const nextId = selectedProfile?.id || createProfileId()
 
-    setSavedProfiles((current) => {
-      const existingIndex = current.findIndex((item) => item.id === nextId)
-      if (existingIndex >= 0) {
-        const next = [...current]
-        next[existingIndex] = { ...next[existingIndex], name, points: pointsToSave, updatedAt: now }
-        return next
-      }
-      return [...current, { id: nextId, name, points: pointsToSave, createdAt: now, updatedAt: now }]
-    })
-    setSelectedProfileId(nextId)
-    setProfileName(name)
-  }, [profileName, routePoints, savedProfiles, selectedProfileId])
+    setProfileActionLoading(true)
+    setProfileError(null)
+    setProfileMessage(null)
 
-  const deleteSelectedRouteProfile = useCallback(() => {
-    if (!selectedProfileId) return
-    setSavedProfiles((current) => current.filter((item) => item.id !== selectedProfileId))
-    setSelectedProfileId('')
-    setProfileName('')
-  }, [selectedProfileId])
+    try {
+      const response = await fetch(TERRAIN_PROFILES_ENDPOINT, {
+        method: 'POST',
+        headers: authHeaders(true),
+        body: JSON.stringify({ id: nextId, name, points: pointsToSave }),
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      const [savedProfile] = normalizeSavedProfiles([await response.json()])
+      if (!savedProfile) throw new Error('保存結果を読み取れませんでした')
+
+      setSavedProfiles((current) => {
+        const withoutSaved = current.filter((item) => item.id !== savedProfile.id)
+        return [savedProfile, ...withoutSaved]
+      })
+      setSelectedProfileId(savedProfile.id)
+      setProfileName(savedProfile.name)
+      setProfileMessage('共有プロファイルに保存しました。')
+    } catch (error) {
+      console.error(error)
+      setProfileError(error instanceof Error && error.message === 'ログインが必要です'
+        ? 'GitHub ログインが必要です。'
+        : '共有プロファイルの保存に失敗しました。')
+    } finally {
+      setProfileActionLoading(false)
+    }
+  }, [authHeaders, isGithubUser, profileName, routePoints, savedProfiles, selectedProfileId, user?.id])
+
+  const deleteSelectedRouteProfile = useCallback(async () => {
+    if (!selectedProfileId || !isGithubUser) return
+    const selectedProfile = savedProfiles.find((item) => item.id === selectedProfileId) ?? null
+    if (!selectedProfile || selectedProfile.createdBy !== user?.id) return
+    if (!confirm('この共有プロファイルを削除しますか？')) return
+
+    setProfileActionLoading(true)
+    setProfileError(null)
+    setProfileMessage(null)
+
+    try {
+      const response = await fetch(terrainProfileEndpoint(selectedProfileId), {
+        method: 'DELETE',
+        headers: authHeaders(),
+      })
+      if (!response.ok) throw new Error(await responseError(response))
+      setSavedProfiles((current) => current.filter((item) => item.id !== selectedProfileId))
+      setSelectedProfileId('')
+      setProfileName(nextProfileName(savedProfiles.filter((item) => item.id !== selectedProfileId)))
+      setProfileMessage('共有プロファイルを削除しました。')
+    } catch (error) {
+      console.error(error)
+      setProfileError(error instanceof Error && error.message === 'ログインが必要です'
+        ? 'GitHub ログインが必要です。'
+        : '共有プロファイルの削除に失敗しました。')
+    } finally {
+      setProfileActionLoading(false)
+    }
+  }, [authHeaders, isGithubUser, savedProfiles, selectedProfileId, user?.id])
 
   useEffect(() => {
     if (profileName || selectedProfileId) return
@@ -1135,6 +1567,8 @@ export default function TerrainPageClient() {
     points,
     routePoints,
     verticalExaggeration,
+    mapFeatures,
+    visibleLayers,
   })
 
   const insidePointCount = useMemo(
@@ -1151,6 +1585,14 @@ export default function TerrainPageClient() {
     () => savedProfiles.find((item) => item.id === selectedProfileId) ?? null,
     [savedProfiles, selectedProfileId]
   )
+  const canManageSelectedProfile = Boolean(selectedSavedProfile?.createdBy && selectedSavedProfile.createdBy === user?.id)
+  const canSaveProfile = isGithubUser && routePoints.length >= 2 && (!selectedSavedProfile || !selectedSavedProfile.createdBy || canManageSelectedProfile)
+  const canDeleteProfile = isGithubUser && Boolean(selectedProfileId) && canManageSelectedProfile
+  const enabledLayerCount = MAP_LAYER_OPTIONS.filter((option) => visibleLayers[option.key]).length
+  const mapFeatureCount = mapFeatures.lines.length + mapFeatures.labels.length
+  const toggleMapLayer = useCallback((key: MapLayerKey) => {
+    setVisibleLayers((current) => ({ ...current, [key]: !current[key] }))
+  }, [])
 
   const downloadCombinedPng = useCallback(async () => {
     const sceneCanvas = sceneRef.current?.querySelector('canvas') as HTMLCanvasElement | null | undefined
@@ -1289,6 +1731,7 @@ export default function TerrainPageClient() {
                 <span>{usingFallback ? 'サンプル点' : `保存ピン ${points.length}点`}</span>
                 <span>表示範囲内 {insidePointCount}点</span>
                 <span>測線 {routePoints.length}点</span>
+                <span>レイヤー {enabledLayerCount}種</span>
                 {terrainLoading && <span>DEM読み込み中</span>}
                 {terrainError && <span className="text-red-600">DEM取得に失敗しました</span>}
               </div>
@@ -1310,6 +1753,8 @@ export default function TerrainPageClient() {
                   onSelectPoint={addRoutePoint}
                   onAddFreePoint={addFreeRoutePoint}
                   onExporterReady={registerMapExporter}
+                  mapFeatures={mapFeatures}
+                  visibleLayers={visibleLayers}
                 />
               </div>
             </section>
@@ -1379,7 +1824,7 @@ export default function TerrainPageClient() {
                   計算中
                 </div>
               ) : (
-                <ElevationProfileChart profile={profile} />
+                <ElevationProfileChart profile={profile} routePoints={routePoints} />
               )}
             </div>
           </section>
@@ -1387,18 +1832,26 @@ export default function TerrainPageClient() {
 
         <aside className="space-y-4">
           <section className="rounded border bg-white p-4 shadow-sm">
-            <div className="mb-3 flex items-center gap-2">
-              <IoBookmarkOutline className="text-lg text-teal-700" />
-              <h2 className="text-base font-semibold">プロファイル</h2>
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <IoBookmarkOutline className="text-lg text-teal-700" />
+                <h2 className="text-base font-semibold">共有プロファイル</h2>
+              </div>
+              <span className="text-xs text-gray-500">
+                {profilesLoading ? '読込中' : `${savedProfiles.length}件`}
+              </span>
             </div>
             <div className="space-y-3">
               <select
-                className="w-full rounded border bg-white px-3 py-2 text-sm"
+                className="w-full rounded border bg-white px-3 py-2 text-sm disabled:bg-gray-100 disabled:text-gray-400"
                 value={selectedProfileId}
+                disabled={profilesLoading || profileActionLoading}
                 onChange={(event) => {
                   const profileId = event.target.value
                   if (profileId) loadSavedRouteProfile(profileId)
                   else startNewSavedProfile()
+                  setProfileMessage(null)
+                  setProfileError(null)
                 }}
               >
                 <option value="">新規プロファイル</option>
@@ -1410,9 +1863,10 @@ export default function TerrainPageClient() {
               </select>
               <input
                 type="text"
-                className="w-full rounded border px-3 py-2 text-sm"
+                className="w-full rounded border px-3 py-2 text-sm disabled:bg-gray-100 disabled:text-gray-400"
                 placeholder="プロファイル名"
                 value={profileName}
+                disabled={profileActionLoading}
                 onChange={(event) => setProfileName(event.target.value)}
               />
               <div className="grid grid-cols-3 gap-2">
@@ -1420,15 +1874,16 @@ export default function TerrainPageClient() {
                   type="button"
                   className="inline-flex items-center justify-center gap-1 rounded border bg-teal-700 px-2 py-2 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400"
                   onClick={saveCurrentRouteProfile}
-                  disabled={routePoints.length < 2}
+                  disabled={!canSaveProfile || profileActionLoading || authLoading}
                 >
                   <IoSaveOutline />
-                  保存
+                  {profileActionLoading ? '処理中' : '保存'}
                 </button>
                 <button
                   type="button"
-                  className="rounded border bg-white px-2 py-2 text-sm font-semibold text-gray-700 transition hover:border-teal-500 hover:text-teal-700"
+                  className="rounded border bg-white px-2 py-2 text-sm font-semibold text-gray-700 transition hover:border-teal-500 hover:text-teal-700 disabled:cursor-not-allowed disabled:text-gray-300"
                   onClick={startNewSavedProfile}
+                  disabled={profileActionLoading}
                 >
                   新規
                 </button>
@@ -1436,16 +1891,63 @@ export default function TerrainPageClient() {
                   type="button"
                   className="rounded border bg-white px-2 py-2 text-sm font-semibold text-gray-700 transition hover:border-red-500 hover:text-red-600 disabled:cursor-not-allowed disabled:text-gray-300"
                   onClick={deleteSelectedRouteProfile}
-                  disabled={!selectedProfileId}
+                  disabled={!canDeleteProfile || profileActionLoading || authLoading}
                 >
                   削除
                 </button>
               </div>
+              {!authLoading && !isGithubUser && (
+                <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  保存・削除は GitHub ログイン後に有効になります。
+                </div>
+              )}
               {selectedSavedProfile && (
                 <div className="text-xs text-gray-500">
                   {selectedSavedProfile.points.length}点 / 更新 {new Date(selectedSavedProfile.updatedAt).toLocaleString('ja-JP')}
+                  {selectedSavedProfile.createdByLogin ? ` / 作成 ${selectedSavedProfile.createdByLogin}` : ''}
                 </div>
               )}
+              {isGithubUser && selectedSavedProfile?.createdBy && !canManageSelectedProfile && (
+                <div className="rounded border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-700">
+                  他のユーザーが作成した共有プロファイルです。編集する場合は新規として保存してください。
+                </div>
+              )}
+              {profileMessage && <div className="text-xs text-teal-700">{profileMessage}</div>}
+              {profileError && <div className="text-xs text-red-600">{profileError}</div>}
+            </div>
+          </section>
+
+          <section className="rounded border bg-white p-4 shadow-sm">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <IoMapOutline className="text-lg text-teal-700" />
+                <h2 className="text-base font-semibold">表示レイヤー</h2>
+              </div>
+              <span className="text-xs text-gray-500">{enabledLayerCount}/{MAP_LAYER_OPTIONS.length}</span>
+            </div>
+            <div className="space-y-2">
+              {MAP_LAYER_OPTIONS.map((option) => (
+                <label
+                  key={option.key}
+                  className="flex cursor-pointer items-center gap-3 rounded border bg-white px-3 py-2 text-sm transition hover:bg-gray-50"
+                >
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-teal-700"
+                    checked={visibleLayers[option.key]}
+                    onChange={() => toggleMapLayer(option.key)}
+                  />
+                  <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: option.color }} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-semibold text-gray-800">{option.label}</span>
+                    <span className="block text-xs text-gray-500">{option.description}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            <div className="mt-3 text-xs text-gray-500">
+              {mapFeaturesLoading ? 'OSMレイヤー取得中' : `取得済み ${mapFeatureCount}件`}
+              {mapFeaturesError && <span className="ml-2 text-red-600">{mapFeaturesError}</span>}
             </div>
           </section>
 
